@@ -14,7 +14,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Custos"
+rootProject.name = "CustosUltimus"
 include ':app'
 include ':guardian'
 include ':notif-simulator'

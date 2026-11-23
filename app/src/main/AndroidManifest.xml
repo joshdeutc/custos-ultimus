@@ -32,7 +32,7 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <queries>
-        <package android:name="com.jo.custos.guardian" />
+        <package android:name="com.jo.custos.ultimus.guardian" />
         <intent>
             <action android:name="com.jo.custos.guardian.ACTION_BIND_GUARDIAN" />
         </intent>

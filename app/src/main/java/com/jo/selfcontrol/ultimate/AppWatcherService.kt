@@ -124,14 +124,14 @@ class AppWatcherService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                     if (!packageName.startsWith("com.android.systemui") &&
                         packageName != imePackage &&
-                        packageName != "com.jo.selfcontrol.ultimate"
+                        packageName != "com.jo.custos.ultimus.app"
                     ) {
                         currentForegroundApp = packageName
                     }
                 }
                 AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
                     if (packageName in SelfControlNotificationListener.mutedPackages &&
-                        packageName != "com.jo.selfcontrol.ultimate"
+                        packageName != "com.jo.custos.ultimus.app"
                     ) {
                         performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
                         dismissHeadsUpNotification(packageName)

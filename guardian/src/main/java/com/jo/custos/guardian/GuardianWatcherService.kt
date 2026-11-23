@@ -51,9 +51,9 @@ class GuardianWatcherService : AccessibilityService() {
         )
 
         private val PROTECTED_TARGETS = setOf(
-            "Custos", "custos", "SelfControl", "selfcontrol", "Self control", "Self Control",
-            "Custos Guardian", "Guardian", "guardian",
-            "com.jo.selfcontrol.ultimate", "com.jo.custos.guardian"
+            "Custos", "custos", "Custos Ultimus", "Ultimus", "SelfControl", "selfcontrol", "Self control", "Self Control",
+            "Custos Guardian", "Custos Ultimus Guardian", "Guardian", "guardian",
+            "com.jo.custos.ultimus.app", "com.jo.custos.ultimus.guardian"
         )
 
         private val CANCEL_KEYWORDS = setOf("Cancel", "Annuler", "No", "Non")
@@ -266,7 +266,7 @@ class GuardianWatcherService : AccessibilityService() {
             val pkg = event.packageName?.toString() ?: return
 
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                if (!pkg.startsWith("com.android.systemui") && pkg != imePackage && pkg != "com.jo.custos.guardian") {
+                if (!pkg.startsWith("com.android.systemui") && pkg != imePackage && pkg != "com.jo.custos.ultimus.guardian") {
                     // F4: feed the accessibility-driven usage tracker for real foreground app transitions
                     // (including launcher, which closes any limited app's interval when going home, while
                     // ignoring keyboard/IME, SystemUI, and Guardian overlay popups).

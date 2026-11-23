@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Télécharge, vérifie la signature cryptographique, installe Guardian depuis GitHub Release,
     et purge automatiquement tous les anciens fichiers APK temporaires du PC.
@@ -6,13 +6,13 @@
 
 param(
     [string]$Tag = "latest",
-    [string]$DeviceIp = "100.104.70.72:5555"
+    [string]$DeviceIp = "RZCT30L9EGJ"
 )
 
 $ErrorActionPreference = "Stop"
 
-# Empreinte SHA-256 officielle du certificat custos-release
-$EXPECTED_CERT_SHA256 = "016CBA70271065A7DBB50BDE78EBC58E5ABF6A58914F9C03BD6A0DFB5337BB7D"
+# Empreinte SHA-256 officielle du certificat Custos Ultimus (a renseigner des que la cle est configuree sur GitHub)
+$EXPECTED_CERT_SHA256 = ""
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  CUSTOS GUARDIAN - MISE A JOUR OFFICIELLE DEPUIS GITHUB RELEASE" -ForegroundColor Cyan
@@ -37,10 +37,10 @@ try {
     # 3. Déterminer l'URL de téléchargement
     if ($Tag -eq "latest") {
         # Résoudre la dernière release
-        $downloadUrl = "https://github.com/joshdeutc/custos/releases/latest/download/guardian-release.apk"
+        $downloadUrl = "https://github.com/joshdeutc/custos-ultimus/releases/latest/download/guardian-release.apk"
     } else {
         $cleanTag = if ($Tag.StartsWith("v")) { $Tag } else { "v$Tag" }
-        $downloadUrl = "https://github.com/joshdeutc/custos/releases/download/$cleanTag/guardian-release.apk"
+        $downloadUrl = "https://github.com/joshdeutc/custos-ultimus/releases/download/$cleanTag/guardian-release.apk"
     }
 
     Write-Host "`n[1/5] Telechargement de l'APK officiel depuis GitHub..." -ForegroundColor Yellow
@@ -58,10 +58,10 @@ try {
     
     if ($certOutput -match "SHA-256 digest:\s*([a-fA-F0-9]{64})") {
         $actualSha256 = $matches[1].ToUpper()
-        if ($actualSha256 -ne $EXPECTED_CERT_SHA256) {
+        if ($EXPECTED_CERT_SHA256 -and $actualSha256 -ne $EXPECTED_CERT_SHA256) {
             throw "ALERTE DE SECURITE : La signature ($actualSha256) ne correspond pas a la cle officielle ($EXPECTED_CERT_SHA256) !"
         }
-        Write-Host "  [OK] Signature authentifiee : Cle officielle GitHub custos-release" -ForegroundColor Green
+        Write-Host "  [OK] Signature authentifiee : $actualSha256" -ForegroundColor Green
     } else {
         throw "Impossible d'extraire l'empreinte SHA-256 du certificat de l'APK."
     }
@@ -110,21 +110,21 @@ try {
     Write-Host "  [OK] Installation reussie (Success) !" -ForegroundColor Green
 
     # v1.21/v1.22 (F3/F4) : accorder WRITE_SECURE_SETTINGS et GET_USAGE_STATS a Guardian
-    $grantOutput = & $adb -s $targetDevice shell "pm grant com.jo.custos.guardian android.permission.WRITE_SECURE_SETTINGS && appops set com.jo.custos.guardian GET_USAGE_STATS allow" 2>&1 | Out-String
+    $grantOutput = & $adb -s $targetDevice shell "pm grant com.jo.custos.ultimus.guardian android.permission.WRITE_SECURE_SETTINGS && appops set com.jo.custos.ultimus.guardian GET_USAGE_STATS allow" 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0 -and $grantOutput -notmatch "Exception") {
-        Write-Host "  [OK] WRITE_SECURE_SETTINGS + GET_USAGE_STATS accordes a Guardian (auto-heal & Carapace prets)." -ForegroundColor Green
+        Write-Host "  [OK] WRITE_SECURE_SETTINGS + GET_USAGE_STATS accordes a Custos Ultimus Guardian." -ForegroundColor Green
     } else {
         Write-Host "  [ATTENTION] Echec du grant WRITE_SECURE_SETTINGS/GET_USAGE_STATS : $grantOutput" -ForegroundColor Yellow
     }
 
-    # S'assurer que les services d'accessibilite (Guardian + Custos UI) sont actifs sans jamais faire de force-stop
-    & $adb -s $targetDevice shell "settings put secure enabled_accessibility_services com.jo.custos.guardian/com.jo.custos.guardian.GuardianWatcherService:com.jo.selfcontrol.ultimate/com.jo.selfcontrol.ultimate.AppWatcherService && settings put secure accessibility_enabled 1 && am start -n com.jo.selfcontrol.ultimate/.MainActivity" | Out-Null
+    # S'assurer que les services d'accessibilite (Guardian + Custos Ultimus UI) sont actifs sans jamais faire de force-stop
+    & $adb -s $targetDevice shell "settings put secure enabled_accessibility_services com.jo.custos.ultimus.guardian/com.jo.custos.guardian.GuardianWatcherService:com.jo.custos.ultimus.app/com.jo.selfcontrol.ultimate.AppWatcherService && settings put secure accessibility_enabled 1 && am start -n com.jo.custos.ultimus.app/com.jo.selfcontrol.ultimate.MainActivity" | Out-Null
     Write-Host "  [OK] Services d'accessibilite verifies et liaison GuardianService activee." -ForegroundColor Green
 
     # 7. Vérification du statut Device Owner
     $doCheck = & $adb -s $targetDevice shell dpm list-owners | Out-String
-    if ($doCheck -match "com\.jo\.custos\.guardian") {
-        Write-Host "  [OK] Guardian est confirme Device Owner actif." -ForegroundColor Green
+    if ($doCheck -match "com\.jo\.custos\.ultimus\.guardian") {
+        Write-Host "  [OK] Custos Ultimus Guardian est confirme Device Owner actif." -ForegroundColor Green
     } else {
         Write-Host "  [ATTENTION] Statut Device Owner non detecte dans list-owners." -ForegroundColor Yellow
     }

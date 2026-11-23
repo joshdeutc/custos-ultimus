@@ -10,8 +10,8 @@ import com.jo.custos.guardian.IGuardianService
 
 object GuardianClient {
 
-    private const val TAG = "Custos.GuardianClient"
-    private const val GUARDIAN_PACKAGE = "com.jo.custos.guardian"
+    private const val TAG = "CustosUltimus.GuardianClient"
+    private const val GUARDIAN_PACKAGE = "com.jo.custos.ultimus.guardian"
     private const val GUARDIAN_ACTION = "com.jo.custos.guardian.ACTION_BIND_GUARDIAN"
 
     @Volatile

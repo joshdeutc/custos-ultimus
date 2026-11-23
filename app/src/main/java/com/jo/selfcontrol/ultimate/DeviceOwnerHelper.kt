@@ -50,8 +50,8 @@ object DeviceOwnerHelper {
             Log.i(TAG, "setUninstallBlocked(true) on $pkg")
         }.onFailure { Log.e(TAG, "setUninstallBlocked failed: ${it.message}") }
         runCatching {
-            d.setUninstallBlocked(a, "com.jo.custos.guardian", true)
-            Log.i(TAG, "setUninstallBlocked(true) on com.jo.custos.guardian")
+            d.setUninstallBlocked(a, "com.jo.custos.ultimus.guardian", true)
+            Log.i(TAG, "setUninstallBlocked(true) on com.jo.custos.ultimus.guardian")
         }.onFailure { /* guardian may not be installed on standalone flavors */ }
 
         // 2. Auto-grant runtime permissions critical to enforcement (only if silent grant enabled)

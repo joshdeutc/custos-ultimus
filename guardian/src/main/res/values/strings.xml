@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Custos Guardian</string>
-    <string name="admin_description">Gardien autonome de sécurité et d\'immuabilité temporelle pour Custos.</string>
-    <string name="accessibility_service_name">Custos Guardian Surveillance</string>
-    <string name="accessibility_description">Service d\'accessibilité autonome du gardien Custos pour le blocage d\'écran et la protection des réglages.</string>
+    <string name="app_name">Custos Ultimus Guardian</string>
+    <string name="admin_description">Gardien autonome de sécurité et d\'immuabilité temporelle pour Custos Ultimus.</string>
+    <string name="accessibility_service_name">Custos Ultimus Guardian</string>
+    <string name="accessibility_description">Service d\'accessibilité autonome du gardien Custos Ultimus pour le blocage d\'écran et la protection des réglages.</string>
 </resources>

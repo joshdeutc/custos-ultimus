@@ -544,7 +544,7 @@ class GuardianService : Service() {
         private const val FG_CHANNEL_ID = "guardian_carapace_alert"
         private const val FG_NOTIFICATION_ID = 7341
         const val EXTRA_FG = "com.jo.custos.guardian.EXTRA_FG"
-        private const val CLIENT_UI_PACKAGE = "com.jo.selfcontrol.ultimate"
+        private const val CLIENT_UI_PACKAGE = "com.jo.custos.ultimus.app"
 
         // F6 — TODO(custos): renseigner les 2 empreintes SHA-256 du certificat de signature de
         // com.jo.selfcontrol.ultimate (Release officielle + Debug developpeur), au format

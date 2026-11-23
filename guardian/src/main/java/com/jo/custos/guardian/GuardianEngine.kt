@@ -174,8 +174,8 @@ object GuardianEngine {
         "com.android.server.telecom",
         "com.android.providers.telephony",
         "com.tailscale.ipn",
-        "com.jo.custos.guardian",
-        "com.jo.selfcontrol.ultimate" // Client UI
+        "com.jo.custos.ultimus.guardian",
+        "com.jo.custos.ultimus.app" // Client UI
     )
 
     private val HARD_GUARDS = CRITICAL_PACKAGES
@@ -736,8 +736,9 @@ object GuardianEngine {
             if (dpm != null) {
                 runCatching {
                     dpm.setUninstallBlocked(admin, ctx.packageName, true)
-                    dpm.setUninstallBlocked(admin, "com.jo.selfcontrol.ultimate", true)
+                    dpm.setUninstallBlocked(admin, "com.jo.custos.ultimus.app", true)
                     dpm.clearUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET)
+                    runCatching { applyEnterpriseFrpPolicy(dpm, admin) }
                     runCatching { dpm.addUserRestriction(admin, UserManager.DISALLOW_SAFE_BOOT) }
                     ensureAccessibilityServicesEnabled(ctx)
                     if (isProtectionHealthy(ctx)) {
@@ -777,7 +778,7 @@ object GuardianEngine {
                             )
                             dpm.setPermissionGrantState(
                                 admin,
-                                "com.jo.selfcontrol.ultimate",
+                                "com.jo.custos.ultimus.app",
                                 android.Manifest.permission.POST_NOTIFICATIONS,
                                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
                             )
@@ -1211,8 +1212,8 @@ object GuardianEngine {
                 android.provider.Settings.Secure.ACCESSIBILITY_ENABLED
             ) ?: "0"
             on == "1" && list.split(':').any {
-                it == "com.jo.custos.guardian/com.jo.custos.guardian.GuardianWatcherService" ||
-                    it == "com.jo.custos.guardian/.GuardianWatcherService"
+                it == "com.jo.custos.ultimus.guardian/com.jo.custos.guardian.GuardianWatcherService" ||
+                    it == "com.jo.custos.ultimus.guardian/.GuardianWatcherService"
             }
         } catch (e: Exception) {
             true // never fail-close on a read error
@@ -1333,10 +1334,10 @@ object GuardianEngine {
         if (!isDeviceOwner(ctx)) return
         val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager ?: return
         val admin = getAdminComponent(ctx)
-        val guardianSvc = "com.jo.custos.guardian/com.jo.custos.guardian.GuardianWatcherService"
-        val guardianShort = "com.jo.custos.guardian/.GuardianWatcherService"
-        val uiSvc = "com.jo.selfcontrol.ultimate/com.jo.selfcontrol.ultimate.AppWatcherService"
-        val uiShort = "com.jo.selfcontrol.ultimate/.AppWatcherService"
+        val guardianSvc = "com.jo.custos.ultimus.guardian/com.jo.custos.guardian.GuardianWatcherService"
+        val guardianShort = "com.jo.custos.ultimus.guardian/.GuardianWatcherService"
+        val uiSvc = "com.jo.custos.ultimus.app/com.jo.selfcontrol.ultimate.AppWatcherService"
+        val uiShort = "com.jo.custos.ultimus.app/.AppWatcherService"
 
         runCatching {
             val current = android.provider.Settings.Secure.getString(
@@ -1353,7 +1354,7 @@ object GuardianEngine {
                 entries.add(guardianSvc)
                 changed = true
             }
-            if (isPackageInstalled(ctx, "com.jo.selfcontrol.ultimate") &&
+            if (isPackageInstalled(ctx, "com.jo.custos.ultimus.app") &&
                 entries.none { it == uiSvc || it == uiShort }
             ) {
                 entries.add(uiSvc)
@@ -1704,6 +1705,33 @@ object GuardianEngine {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to enforce internet curfew (blocked=$blocked): ${e.message}", e)
+        }
+    }
+
+    /**
+     * Custos Ultimus: Enterprise Factory Reset Protection (FRP — Android 11+ / API 30+).
+     * Keeps hardware Recovery intact (anti-brick fail-safe) while locking the device to the
+     * administrator's Google Account(s) after any Factory Reset so resetting the phone cannot
+     * be used as a bypass backdoor.
+     *
+     * IMPORTANT: Entries MUST be 21-digit numeric Google Account Gaia IDs (NOT email addresses).
+     */
+    private val FRP_ADMIN_ACCOUNT_IDS = listOf<String>(
+        // Populate with your 21-digit Google Account Gaia ID before releasing to the target device
+    )
+
+    private fun applyEnterpriseFrpPolicy(dpm: DevicePolicyManager, admin: ComponentName) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        if (FRP_ADMIN_ACCOUNT_IDS.isEmpty()) return
+        runCatching {
+            val policy = android.app.admin.FactoryResetProtectionPolicy.Builder()
+                .setFactoryResetProtectionAccounts(FRP_ADMIN_ACCOUNT_IDS)
+                .setFactoryResetProtectionEnabled(true)
+                .build()
+            dpm.setFactoryResetProtectionPolicy(admin, policy)
+            Log.i(TAG, "🔐 Enterprise FRP policy enforced (${FRP_ADMIN_ACCOUNT_IDS.size} admin account(s))")
+        }.onFailure {
+            Log.e(TAG, "Failed to apply Enterprise FRP policy: ${it.message}", it)
         }
     }
 }

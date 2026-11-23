@@ -14,6 +14,8 @@ local.properties
 *.jks
 keystore.properties
 keystore_base64.txt
+*-keystore-base64.txt
+temp_release_download/
 
 # Logs & OS cruft
 *.log
