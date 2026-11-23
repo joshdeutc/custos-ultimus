@@ -737,8 +737,7 @@ object GuardianEngine {
                 runCatching {
                     dpm.setUninstallBlocked(admin, ctx.packageName, true)
                     dpm.setUninstallBlocked(admin, "com.jo.custos.ultimus.app", true)
-                    dpm.clearUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET)
-                    runCatching { applyEnterpriseFrpPolicy(dpm, admin) }
+                    dpm.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET)
                     runCatching { dpm.addUserRestriction(admin, UserManager.DISALLOW_SAFE_BOOT) }
                     ensureAccessibilityServicesEnabled(ctx)
                     if (isProtectionHealthy(ctx)) {
@@ -1705,33 +1704,6 @@ object GuardianEngine {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to enforce internet curfew (blocked=$blocked): ${e.message}", e)
-        }
-    }
-
-    /**
-     * Custos Ultimus: Enterprise Factory Reset Protection (FRP — Android 11+ / API 30+).
-     * Keeps hardware Recovery intact (anti-brick fail-safe) while locking the device to the
-     * administrator's Google Account(s) after any Factory Reset so resetting the phone cannot
-     * be used as a bypass backdoor.
-     *
-     * IMPORTANT: Entries MUST be 21-digit numeric Google Account Gaia IDs (NOT email addresses).
-     */
-    private val FRP_ADMIN_ACCOUNT_IDS = listOf<String>(
-        // Populate with your 21-digit Google Account Gaia ID before releasing to the target device
-    )
-
-    private fun applyEnterpriseFrpPolicy(dpm: DevicePolicyManager, admin: ComponentName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        if (FRP_ADMIN_ACCOUNT_IDS.isEmpty()) return
-        runCatching {
-            val policy = android.app.admin.FactoryResetProtectionPolicy.Builder()
-                .setFactoryResetProtectionAccounts(FRP_ADMIN_ACCOUNT_IDS)
-                .setFactoryResetProtectionEnabled(true)
-                .build()
-            dpm.setFactoryResetProtectionPolicy(admin, policy)
-            Log.i(TAG, "🔐 Enterprise FRP policy enforced (${FRP_ADMIN_ACCOUNT_IDS.size} admin account(s))")
-        }.onFailure {
-            Log.e(TAG, "Failed to apply Enterprise FRP policy: ${it.message}", it)
         }
     }
 }
