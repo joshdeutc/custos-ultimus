@@ -12,8 +12,8 @@ permissions:
 jobs:
   build-release:
     runs-on: ubuntu-latest
-    # Cet environnement impose le Wait Timer (ex: 24h ou 48h) configuré dans les réglages GitHub
-    environment: production
+    # Cet environnement impose le Wait Timer configuré dans les réglages GitHub
+    environment: CustosUltimus
 
     steps:
       - name: Checkout code
