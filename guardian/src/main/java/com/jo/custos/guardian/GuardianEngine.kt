@@ -294,11 +294,14 @@ object GuardianEngine {
     }
 
     private fun loadState(ctx: Context): GuardianState {
+        ConfigManager.applyGitHubReleaseRevocations(ctx)
         val file = File(ctx.filesDir, STATE_FILE)
         if (!file.exists()) {
+            val initialEnabled = !ConfigManager.consumeGitHubWhitelistDisable(ctx)
+            val initialDelay = ConfigManager.consumeGitHubWhitelistDelayOverrideHours(ctx) ?: DEFAULT_DELAY_HOURS
             val initial = GuardianState(
-                enabled = true,
-                quarantineDelayHours = DEFAULT_DELAY_HOURS,
+                enabled = initialEnabled,
+                quarantineDelayHours = initialDelay,
                 allowedPackages = HARD_GUARDS + getInitialAllowedPackages(ctx)
             )
             saveStateInternal(ctx, initial)
@@ -332,31 +335,42 @@ object GuardianEngine {
                 )
             }
 
-            var pendingDelayHours = if (json.has("pending_delay_hours") && !json.isNull("pending_delay_hours")) {
-                json.getInt("pending_delay_hours")
-            } else null
-            var pendingDelayExec = json.optLong("pending_delay_execute_at", 0L)
-            val pendingDisableExec = json.optLong("pending_disable_execute_at", 0L)
+            var finalEnabled = enabled
+            if (ConfigManager.consumeGitHubWhitelistDisable(ctx)) {
+                finalEnabled = false
+            }
+            val overrideDelay = ConfigManager.consumeGitHubWhitelistDelayOverrideHours(ctx)
+            if (overrideDelay != null) {
+                delayHours = overrideDelay
+            }
+
+            val hadPendingDelayOrDisable = (json.has("pending_delay_hours") && !json.isNull("pending_delay_hours")) ||
+                json.optLong("pending_delay_execute_at", 0L) > 0L ||
+                json.optLong("pending_disable_execute_at", 0L) > 0L
+            if (hadPendingDelayOrDisable) {
+                Log.w(TAG, "🔒 Purged pending whitelist delay/disable countdowns on Custos Ultimus")
+            }
 
             delayHours = delayHours.coerceIn(0, 168)
-            if (pendingDelayHours != null) {
-                pendingDelayHours = pendingDelayHours.coerceIn(0, 168)
-            }
             val dnsHost = if (json.has("private_dns_host")) {
                 if (json.isNull("private_dns_host")) null else json.getString("private_dns_host")
             } else DEFAULT_PRIVATE_DNS
 
             val state = GuardianState(
-                enabled = enabled,
+                enabled = finalEnabled,
                 quarantineDelayHours = delayHours,
                 allowedPackages = allowed,
                 pendingRequests = reqs,
-                pendingDelayHours = pendingDelayHours,
-                pendingDelayExecuteAt = pendingDelayExec,
-                pendingDisableExecuteAt = pendingDisableExec,
+                pendingDelayHours = null,
+                pendingDelayExecuteAt = 0L,
+                pendingDisableExecuteAt = 0L,
                 privateDnsHost = dnsHost
             )
-            if (nonGuards.isEmpty() || delayHours != json.optInt("quarantine_delay_hours", 0) || pendingDelayExec != json.optLong("pending_delay_execute_at", 0L)) {
+            if (nonGuards.isEmpty() ||
+                finalEnabled != enabled ||
+                delayHours != json.optInt("quarantine_delay_hours", 0) ||
+                hadPendingDelayOrDisable
+            ) {
                 saveStateInternal(ctx, state)
             }
             state
@@ -477,27 +491,21 @@ object GuardianEngine {
                 stateChanged = true
             }
 
-            // 2. Pending delay change
+            // 2 & 3. Pending delay reduction / whitelist deactivation are prohibited on Custos Ultimus
             var activeDelay = state.quarantineDelayHours
             var pDelayHours = state.pendingDelayHours
             var pDelayExec = state.pendingDelayExecuteAt
-            if (pDelayExec in 1..now && pDelayHours != null) {
-                activeDelay = pDelayHours
+            if (pDelayHours != null || pDelayExec != 0L) {
                 pDelayHours = null
                 pDelayExec = 0L
                 stateChanged = true
-                Log.i(TAG, "Applied new quarantine delay: ${activeDelay}h")
             }
 
-            // 3. Pending whitelist disable
             var activeEnabled = state.enabled
             var pDisableExec = state.pendingDisableExecuteAt
-            if (pDisableExec in 1..now) {
-                activeEnabled = false
+            if (pDisableExec != 0L) {
                 pDisableExec = 0L
                 stateChanged = true
-                Log.w(TAG, "Whitelist deactivation executed after delay -> releasing all apps")
-                releaseAll(ctx)
             }
 
             if (stateChanged) {
@@ -650,15 +658,9 @@ object GuardianEngine {
                 scheduleNextUnlockAlarm(ctx)
                 return true
             } else {
-                // Relaxing / Decreasing protection -> Constitutional delay mandatory!
-                val executeAt = System.currentTimeMillis() + (current * 3600_000L)
-                saveStateInternal(ctx, state.copy(
-                    pendingDelayHours = clampedHours,
-                    pendingDelayExecuteAt = executeAt
-                ))
-                Log.w(TAG, "Delay reduction to ${clampedHours}h scheduled in ${current}h")
-                scheduleNextUnlockAlarm(ctx)
-                return true
+                // Custos Ultimus: delay is permanent and cannot be decreased on-device
+                Log.w(TAG, "🔒 Blocked quarantine delay reduction (${current}h -> ${clampedHours}h) — permanent on Custos Ultimus")
+                return false
             }
         }
     }
@@ -678,18 +680,8 @@ object GuardianEngine {
     }
 
     fun requestDisableWhitelist(ctx: Context): Boolean {
-        synchronized(lock) {
-            checkAndPromotePendingRequests(ctx)
-            val state = getState(ctx)
-            if (!state.enabled) return true
-
-            val current = state.quarantineDelayHours
-            val executeAt = System.currentTimeMillis() + (current * 3600_000L)
-            saveStateInternal(ctx, state.copy(pendingDisableExecuteAt = executeAt))
-            Log.w(TAG, "Whitelist deactivation scheduled in ${current}h")
-            scheduleNextUnlockAlarm(ctx)
-            return true
-        }
+        Log.w(TAG, "🔒 Blocked requestDisableWhitelist — Whitelist is permanent on Custos Ultimus (GitHub Release only)")
+        return false
     }
 
     fun cancelPendingDisableWhitelist(ctx: Context): Boolean {
@@ -717,8 +709,8 @@ object GuardianEngine {
                 Log.i(TAG, "Whitelist enabled immediately")
                 return true
             } else {
-                // Relaxation: MUST undergo constitutional delay!
-                return requestDisableWhitelist(ctx)
+                Log.w(TAG, "🔒 Blocked setWhitelistEnabled(false) — Whitelist is permanent on Custos Ultimus (GitHub Release only)")
+                return false
             }
         }
     }

@@ -142,9 +142,16 @@ class ConfigManager {
          * ou renseigner les packages/noms ci-dessous pour retirer des règles ciblées dans une nouvelle release.
          */
         const val GITHUB_RELEASE_RULES_RESET_VERSION: Int = 1
+        const val GITHUB_RELEASE_DISABLE_WHITELIST: Boolean = false
+        const val GITHUB_RELEASE_OVERRIDE_WHITELIST_DELAY_HOURS: Int = -1
+        const val GITHUB_RELEASE_RESET_DELAY_RULES: Boolean = false
         val GITHUB_RELEASE_REVOKED_LIMIT_PACKAGES: Set<String> = emptySet()
         val GITHUB_RELEASE_REVOKED_CURFEW_PACKAGES: Set<String> = emptySet()
         val GITHUB_RELEASE_REVOKED_SCREEN_RULES: Set<String> = emptySet()
+
+        private const val PREF_APPLIED_DISABLE_WHITELIST = "applied_disable_whitelist"
+        private const val PREF_APPLIED_WHITELIST_DELAY_OVERRIDE = "applied_whitelist_delay_override"
+        private const val PREF_APPLIED_RESET_DELAY_RULES = "applied_reset_delay_rules"
 
         @Volatile
         private var revocationsChecked = false
@@ -158,11 +165,64 @@ class ConfigManager {
                 if (appliedVersion < GITHUB_RELEASE_RULES_RESET_VERSION) {
                     runCatching { File(context.filesDir, LOCAL_CONFIG_NAME).delete() }
                     runCatching { File(context.filesDir, "screen_rules.json").delete() }
+                    runCatching { File(context.filesDir, "guardian_whitelist.json").delete() }
+                    runCatching { File(context.filesDir, "whitelist_state.json").delete() }
+                    runCatching { File(context.filesDir, "delay_config.json").delete() }
                     runCatching { DelayManager.cancelConfigUpdates(context) }
                     prefs.edit().putInt(PREF_APPLIED_RULES_RESET_VERSION, GITHUB_RELEASE_RULES_RESET_VERSION).apply()
                     Log.w(TAG, "🔄 Applied GitHub Release rules reset v$GITHUB_RELEASE_RULES_RESET_VERSION")
                 }
+                if (GITHUB_RELEASE_RESET_DELAY_RULES) {
+                    if (!prefs.getBoolean(PREF_APPLIED_RESET_DELAY_RULES, false)) {
+                        runCatching { File(context.filesDir, "delay_config.json").delete() }
+                        runCatching { DelayManager.cancelConfigUpdates(context) }
+                        prefs.edit().putBoolean(PREF_APPLIED_RESET_DELAY_RULES, true).apply()
+                        Log.w(TAG, "🔄 Applied GitHub Release delay rules reset")
+                    }
+                } else if (prefs.getBoolean(PREF_APPLIED_RESET_DELAY_RULES, false)) {
+                    prefs.edit().putBoolean(PREF_APPLIED_RESET_DELAY_RULES, false).apply()
+                }
                 revocationsChecked = true
+            }
+        }
+
+        fun consumeGitHubWhitelistDisable(context: Context): Boolean {
+            applyGitHubReleaseRevocations(context)
+            val prefs = context.getSharedPreferences(REVOCATION_PREFS, Context.MODE_PRIVATE)
+            return if (GITHUB_RELEASE_DISABLE_WHITELIST) {
+                if (!prefs.getBoolean(PREF_APPLIED_DISABLE_WHITELIST, false)) {
+                    prefs.edit().putBoolean(PREF_APPLIED_DISABLE_WHITELIST, true).apply()
+                    Log.w(TAG, "🔄 Applied GitHub Release whitelist disable")
+                    true
+                } else {
+                    false
+                }
+            } else {
+                if (prefs.getBoolean(PREF_APPLIED_DISABLE_WHITELIST, false)) {
+                    prefs.edit().putBoolean(PREF_APPLIED_DISABLE_WHITELIST, false).apply()
+                }
+                false
+            }
+        }
+
+        fun consumeGitHubWhitelistDelayOverrideHours(context: Context): Int? {
+            applyGitHubReleaseRevocations(context)
+            val prefs = context.getSharedPreferences(REVOCATION_PREFS, Context.MODE_PRIVATE)
+            return if (GITHUB_RELEASE_OVERRIDE_WHITELIST_DELAY_HOURS >= 0) {
+                val target = GITHUB_RELEASE_OVERRIDE_WHITELIST_DELAY_HOURS.coerceIn(0, 168)
+                val lastApplied = prefs.getInt(PREF_APPLIED_WHITELIST_DELAY_OVERRIDE, -1)
+                if (lastApplied != target) {
+                    prefs.edit().putInt(PREF_APPLIED_WHITELIST_DELAY_OVERRIDE, target).apply()
+                    Log.w(TAG, "🔄 Applied GitHub Release whitelist delay override -> ${target}h")
+                    target
+                } else {
+                    null
+                }
+            } else {
+                if (prefs.getInt(PREF_APPLIED_WHITELIST_DELAY_OVERRIDE, -1) != -1) {
+                    prefs.edit().putInt(PREF_APPLIED_WHITELIST_DELAY_OVERRIDE, -1).apply()
+                }
+                null
             }
         }
 

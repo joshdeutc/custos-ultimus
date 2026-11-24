@@ -44,16 +44,28 @@ object DelayManager {
 
     @Synchronized
     fun loadState(context: Context): DelayState {
-        val file = File(context.filesDir, FILE_NAME)
-        val localState = if (file.exists()) {
-            try {
-                parseDelayState(JSONObject(file.readText()))
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading delay_config.json: ${e.message}")
+        val localState = run {
+            ConfigManager.applyGitHubReleaseRevocations(context)
+            val f = File(context.filesDir, FILE_NAME)
+            if (f.exists()) {
+                try {
+                    val rawJson = JSONObject(f.readText())
+                    val parsed = parseDelayState(rawJson)
+                    val hadPending = rawJson.optLong("unlock_time", 0L) > 0L ||
+                        rawJson.optLong("pending_delay_execute_at", 0L) > 0L ||
+                        rawJson.has("pending_delay_seconds") ||
+                        (rawJson.optJSONArray("pending_configs")?.length() ?: 0) > 0
+                    if (hadPending && !GuardianClient.isAvailable) {
+                        saveState(context, parsed)
+                    }
+                    parsed
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error reading delay_config.json: ${e.message}")
+                    DelayState(globalDelaySeconds = 0, unlockSettingsUnlockTime = 0, requestedConfigUpdates = emptyList())
+                }
+            } else {
                 DelayState(globalDelaySeconds = 0, unlockSettingsUnlockTime = 0, requestedConfigUpdates = emptyList())
             }
-        } else {
-            DelayState(globalDelaySeconds = 0, unlockSettingsUnlockTime = 0, requestedConfigUpdates = emptyList())
         }
 
         if (GuardianClient.isAvailable) {
@@ -80,31 +92,7 @@ object DelayManager {
 
     fun parseDelayState(json: JSONObject): DelayState {
         val delay = json.optInt("global_delay_seconds", 0)
-        val unlockTime = json.optLong("unlock_time", 0L)
-
-        val execAt = json.optLong("pending_delay_execute_at", 0L)
-        val pendingSec = if (execAt > 0L && json.has("pending_delay_seconds")) {
-            json.getInt("pending_delay_seconds")
-        } else null
-        
-        val pendingArray = json.optJSONArray("pending_configs")
-        val pendingList = mutableListOf<PendingConfigUpdate>()
-        if (pendingArray != null) {
-            for (i in 0 until pendingArray.length()) {
-                val obj = pendingArray.getJSONObject(i)
-                pendingList.add(PendingConfigUpdate(
-                    id = obj.optString("id", UUID.randomUUID().toString()),
-                    description = obj.optString("description", "Config change"),
-                    newLimitsJson = obj.optString("config", ""),
-                    executeAt = obj.getLong("execute_at"),
-                    targetType = obj.optString("target_type", "FULL_CONFIG"),
-                    targetKey = obj.optString("target_key", ""),
-                    isDelete = obj.optBoolean("is_delete", false),
-                    payloadJson = obj.optString("payload", obj.optString("config", ""))
-                ))
-            }
-        }
-
+        // Pending delay changes, settings unlock countdowns, and pending removals are disabled on Custos Ultimus
         val scheduleArray = json.optJSONArray("delay_schedule")
         val schedule = mutableListOf<DelayScheduleRule>()
         if (scheduleArray != null) {
@@ -138,7 +126,7 @@ object DelayManager {
             }
         }
 
-        return DelayState(delay, unlockTime, pendingList, schedule, pendingSec, execAt)
+        return DelayState(delay, 0L, emptyList(), schedule, null, 0L)
     }
 
     @Synchronized
@@ -201,6 +189,10 @@ object DelayManager {
 
     fun setGlobalDelay(context: Context, seconds: Int) {
         val state = loadState(context)
+        if (seconds < state.globalDelaySeconds) {
+            Log.w(TAG, "🔒 Blocked global delay reduction (${state.globalDelaySeconds}s -> ${seconds}s) — permanent on Custos Ultimus")
+            return
+        }
         saveState(
             context,
             state.copy(
@@ -230,8 +222,7 @@ object DelayManager {
     }
 
     fun removeScheduleRule(context: Context, ruleId: String) {
-        val state = loadState(context)
-        saveState(context, state.copy(delaySchedule = state.delaySchedule.filter { it.id != ruleId }))
+        Log.w(TAG, "🔒 Blocked removeScheduleRule($ruleId) — delay schedule rules are permanent on Custos Ultimus (GitHub Release only)")
     }
 
     private fun isInTimeWindow(nowMinutes: Int, start: Int, end: Int): Boolean {
@@ -262,39 +253,36 @@ object DelayManager {
     }
 
     /**
-     * Delay change: applied after current [globalDelaySeconds] (unless settings already unlocked / delay 0 handled by UI).
+     * Delay change: increases apply immediately; decreases are blocked permanently on Custos Ultimus.
      */
     fun requestDelayChange(context: Context, newSeconds: Int) {
         val state = loadState(context)
-        val effectiveDelaySeconds = getEffectiveDelaySeconds(state)
-        val executeAt = System.currentTimeMillis() + effectiveDelaySeconds * 1000L
-        saveState(
-            context,
-            state.copy(pendingDelaySeconds = newSeconds, pendingDelayExecuteAt = executeAt)
-        )
-        Log.i(TAG, "Delay change scheduled at $executeAt -> ${newSeconds}s")
+        if (newSeconds > state.globalDelaySeconds) {
+            setGlobalDelay(context, newSeconds)
+            Log.i(TAG, "Global delay increased immediately -> ${newSeconds}s")
+        } else {
+            Log.w(TAG, "🔒 Blocked requestDelayChange(${state.globalDelaySeconds}s -> ${newSeconds}s) — global delay is permanent on Custos Ultimus")
+        }
     }
 
     fun cancelPendingDelayChange(context: Context) {
         val state = loadState(context)
-        saveState(context, state.copy(pendingDelaySeconds = null, pendingDelayExecuteAt = 0L))
-        Log.i(TAG, "Pending delay change cancelled")
+        if (state.pendingDelaySeconds != null || state.pendingDelayExecuteAt != 0L) {
+            saveState(context, state.copy(pendingDelaySeconds = null, pendingDelayExecuteAt = 0L))
+        }
     }
 
     fun applyPendingDelayIfReady(context: Context) {
         val state = loadState(context)
-        val target = state.pendingDelaySeconds ?: return
-        if (state.pendingDelayExecuteAt <= 0L) return
-        if (System.currentTimeMillis() < state.pendingDelayExecuteAt) return
+        if (state.pendingDelaySeconds == null && state.pendingDelayExecuteAt == 0L) return
         saveState(
             context,
             state.copy(
-                globalDelaySeconds = target,
                 pendingDelaySeconds = null,
                 pendingDelayExecuteAt = 0L
             )
         )
-        Log.i(TAG, "Pending delay applied: ${target}s")
+        Log.w(TAG, "🔒 Purged pending delay change — global delay is permanent on Custos Ultimus")
     }
 
     data class ConfiguredDelayItem(
@@ -538,116 +526,24 @@ object DelayManager {
      * 3. The general delay must be 0.
      */
     fun checkUninstallEligibility(context: Context): Pair<Boolean, String?> {
-        val now = System.currentTimeMillis()
-
-        // 1. Vérifier la Whitelist (uniquement si activée)
-        try {
-            val wlState = WhitelistManager.loadState(context)
-            if (wlState.enabled) {
-                if (!wlState.useGlobalDelay) {
-                    return false to "La Whitelist utilise un délai dédié (${wlState.quarantineDelayHours}h). Alignez-la sur le délai général."
-                }
-                if (wlState.pendingDelayExecuteAt > now) {
-                    val rem = ((wlState.pendingDelayExecuteAt - now) / 1000)
-                    return false to "Une modification du délai Whitelist est encore en attente (${formatDuration(rem)} restantes)."
-                }
-                if (wlState.pendingDisableExecuteAt > now) {
-                    val rem = ((wlState.pendingDisableExecuteAt - now) / 1000)
-                    return false to "Une désactivation de la Whitelist est en cours (${formatDuration(rem)} restantes)."
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking Whitelist eligibility: ${e.message}")
-        }
-
-        // 2. Vérifier les règles ConfigManager (Limites, Couvre-feux, Bloqueurs)
-        try {
-            val config = ConfigManager.loadConfig(context)
-            val customLimits = config.limits.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customLimits.isNotEmpty()) {
-                val names = customLimits.joinToString(", ") { getAppLabel(context, it.packageName) }
-                return false to "Des limites d'applications ont un délai de protection dédié ($names). Remettez-les sur le délai général."
-            }
-
-            val customCurfews = config.periodBlocks.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customCurfews.isNotEmpty()) {
-                return false to "Un ou plusieurs couvre-feux ont un délai de protection dédié. Remettez-les sur le délai général."
-            }
-
-            val customGroups = config.installBlocks.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customGroups.isNotEmpty()) {
-                val names = customGroups.joinToString(", ") { it.name }
-                return false to "Des groupes de blocage ont un délai dédié ($names). Remettez-les sur le délai général."
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking ConfigManager eligibility: ${e.message}")
-        }
-
-        // 3. Vérifier ScreenRuleManager
-        try {
-            val customScreenRules = ScreenRuleManager.load(context).filter { (it.protectionDelaySec ?: 0) > 0 }
-            if (customScreenRules.isNotEmpty()) {
-                val names = customScreenRules.joinToString(", ") { it.name }
-                return false to "Des règles d'écran ont un délai dédié ($names). Remettez-les sur le délai général."
-            }
-            val pendingTimers = ScreenRuleManager.loadPendingTimerChanges(context).filter { it.executeAt > now }
-            if (pendingTimers.isNotEmpty()) {
-                return false to "Des modifications de délais sur les règles d'écran sont encore en attente."
-            }
-            val pendingRemovals = ScreenRuleManager.loadPending(context).filter { it.second > now }
-            if (pendingRemovals.isNotEmpty()) {
-                return false to "Des suppressions de règles d'écran sont encore en cours d'attente."
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking ScreenRuleManager eligibility: ${e.message}")
-        }
-
-        // 4. Vérifier les modifications de configuration ou de délai en attente
-        val delayState = loadState(context)
-        if (delayState.requestedConfigUpdates.any { it.executeAt > now }) {
-            return false to "Des modifications de configuration sont encore en cours d'attente."
-        }
-        if (delayState.pendingDelayExecuteAt > now) {
-            val rem = ((delayState.pendingDelayExecuteAt - now) / 1000)
-            return false to "Une modification du délai général est encore en attente (${formatDuration(rem)} restantes)."
-        }
-
-        // 5. Vérifier que le délai général est à 0
-        val effectiveGlobalSec = getCurrentEffectiveDelaySeconds(context).toLong()
-        if (effectiveGlobalSec > 0L) {
-            return false to "Le délai général doit être réglé sur 0 minute (actuellement ${formatDuration(effectiveGlobalSec)})."
-        }
-
-        return true to null
+        return false to "Sur Custos Ultimus, le déverrouillage des paramètres et la désinstallation depuis l'appareil sont désactivés en permanence (retrait via GitHub Release uniquement)."
     }
 
-    // Unlocks settings temporarily to allow device admin removal / uninstallation
+    // Unlocks settings temporarily to allow device admin removal / uninstallation (disabled on Custos Ultimus)
     fun requestSettingsUnlock(context: Context): Pair<Boolean, String?> {
-        val eligibility = checkUninstallEligibility(context)
-        if (!eligibility.first) {
-            Log.w(TAG, "Settings unlock rejected: ${eligibility.second}")
-            return eligibility
-        }
-
-        val state = loadState(context)
-        val effectiveDelaySeconds = getEffectiveDelaySeconds(state)
-        val unlockTime = System.currentTimeMillis() + (effectiveDelaySeconds * 1000L)
-        saveState(context, state.copy(unlockSettingsUnlockTime = unlockTime))
-        Log.i(TAG, "Settings unlock requested. Will unlock at: $unlockTime")
-        return true to null
+        val msg = "Sur Custos Ultimus, le déverrouillage des paramètres et la désinstallation depuis l'appareil sont désactivés en permanence (retrait via GitHub Release uniquement)."
+        Log.w(TAG, "🔒 Blocked requestSettingsUnlock — permanent on Custos Ultimus")
+        return false to msg
     }
 
     fun cancelSettingsUnlock(context: Context) {
         val state = loadState(context)
-        saveState(context, state.copy(unlockSettingsUnlockTime = 0L))
-        Log.i(TAG, "Settings unlock cancelled.")
+        if (state.unlockSettingsUnlockTime != 0L) {
+            saveState(context, state.copy(unlockSettingsUnlockTime = 0L))
+        }
     }
 
-    fun isSettingsUnlocked(context: Context): Boolean {
-        val state = loadState(context)
-        if (state.unlockSettingsUnlockTime == 0L) return false
-        return System.currentTimeMillis() >= state.unlockSettingsUnlockTime
-    }
+    fun isSettingsUnlocked(context: Context): Boolean = false
     
     fun getSettingsUnlockTime(context: Context): Long {
         return loadState(context).unlockSettingsUnlockTime

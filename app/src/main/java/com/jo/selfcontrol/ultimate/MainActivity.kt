@@ -645,10 +645,16 @@ class MainActivity : Activity() {
                         setTextColor(Color.BLACK)
                     })
                     addView(Button(this@MainActivity).apply {
-                        text = "Delete delay rule"
+                        text = "🔒 Règle permanente"
                         setTextColor(Color.WHITE)
-                        background = roundedBackground(Color.parseColor("#D32F2F"))
-                        setOnClickListener { DelayManager.removeScheduleRule(this@MainActivity, rule.id) }
+                        background = roundedBackground(Color.parseColor("#7B1FA2"))
+                        setOnClickListener {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Règle permanente")
+                                .setMessage("Sur Custos Ultimus, les règles de délai planifié ne peuvent pas être supprimées depuis l'appareil ni via ADB.\n\nPour les retirer, publiez une nouvelle release GitHub signée (GITHUB_RELEASE_RESET_DELAY_RULES = true ou incrémenter GITHUB_RELEASE_RULES_RESET_VERSION).")
+                                .setPositiveButton("OK", null)
+                                .show()
+                        }
                     })
                 })
             }
@@ -1268,22 +1274,16 @@ class MainActivity : Activity() {
                         Toast.makeText(this, "Delay increased.", Toast.LENGTH_SHORT).show()
                     }
                     else -> {
-                        // Decreasing delay → must wait (loosening control)
-                        if (currentSeconds == 0 || DelayManager.isSettingsUnlocked(this)) {
-                            DelayManager.setGlobalDelay(this, newSeconds)
-                            refreshDelayUI()
-                            refreshDashboard()
-                            Toast.makeText(this, "Delay updated.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            DelayManager.requestDelayChange(this, newSeconds)
-                            refreshDelayUI()
-                            refreshDashboard()
-                            Toast.makeText(
-                                this,
-                                "Delay decrease will apply after the current waiting period.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
+                        val restrictionDialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
+                            .setTitle("Réduction restreinte")
+                            .setMessage(
+                                "Sur Custos Ultimus, le délai général (${DelayManager.formatDuration(currentSeconds.toLong())}) est permanent et ne peut être qu'augmenté.\n\n" +
+                                "La seule manière de le réduire ou de réinitialiser les délais est de publier une nouvelle release GitHub signée (GITHUB_RELEASE_RESET_DELAY_RULES = true ou incrémenter GITHUB_RELEASE_RULES_RESET_VERSION)."
+                            )
+                            .setPositiveButton("OK", null)
+                            .create()
+                        styleDialogForDarkTheme(restrictionDialog)
+                        restrictionDialog.show()
                     }
                 }
             }
@@ -1579,6 +1579,17 @@ class MainActivity : Activity() {
                                 .create().also { styleDialogForDarkTheme(it); it.show() }
                             return@setPositiveButton
                         }
+                    }
+                    if ((protectionDelaySec ?: 0) < (activeLimit.protectionDelaySec ?: 0)) {
+                        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
+                            .setTitle("Assouplissement restreint")
+                            .setMessage(
+                                "Sur Custos Ultimus, le délai de protection d'une règle est permanent et ne peut pas être réduit depuis l'appareil. " +
+                                "La seule manière de le réduire est de publier une nouvelle version signée sur GitHub."
+                            )
+                            .setPositiveButton("OK", null)
+                            .create().also { styleDialogForDarkTheme(it); it.show() }
+                        return@setPositiveButton
                     }
                 }
 
@@ -2404,57 +2415,25 @@ class MainActivity : Activity() {
 
             if (!BuildConfig.WHITELIST_ADB_ONLY) {
                 val toggleBtn = Button(this@MainActivity).apply {
-                    text = when {
-                        isPendingDisable -> "Annuler"
-                        state.enabled -> "Désactiver"
-                        else -> "Activer"
-                    }
+                    text = if (state.enabled) "🔒 Permanente" else "Activer"
                     textSize = 12f
                     setTextColor(Color.WHITE)
-                    background = roundedBackground(when {
-                        isPendingDisable -> Color.parseColor("#5D4037")
-                        state.enabled -> Color.parseColor("#C62828")
-                        else -> Color.parseColor("#2E7D32")
-                    })
+                    background = roundedBackground(
+                        if (state.enabled) Color.parseColor("#7B1FA2") else Color.parseColor("#2E7D32")
+                    )
                     setPadding(dp(12), dp(6), dp(12), dp(6))
                     setOnClickListener {
-                        if (isPendingDisable) {
-                            WhitelistManager.cancelPendingDisable(this@MainActivity)
-                            Toast.makeText(this@MainActivity, "Désactivation annulée : la Whitelist reste active", Toast.LENGTH_SHORT).show()
-                            refreshInstallBlocksUI(force = true)
-                            refreshDelayUI()
-                        } else if (state.enabled) {
-                            val delaySec = WhitelistManager.getEffectiveQuarantineDelaySeconds(this@MainActivity)
-                            if (DelayManager.isSettingsUnlocked(this@MainActivity) || delaySec <= 0L) {
-                                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog)
-                                    .setTitle("Désactiver la Whitelist ?")
-                                    .setMessage("Toutes les applications seront accessibles librement et démasquées sur l'appareil.")
-                                    .setPositiveButton("Désactiver immédiatement") { _, _ ->
-                                        WhitelistManager.setWhitelistEnabled(this@MainActivity, false)
-                                        Toast.makeText(this@MainActivity, "Whitelist désactivée", Toast.LENGTH_SHORT).show()
-                                        refreshInstallBlocksUI(force = true)
-                                        refreshDelayUI()
-                                    }
-                                    .setNegativeButton("Annuler", null)
-                                    .show()
-                            } else {
-                                val delayText = DelayManager.formatDuration(delaySec)
-                                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog)
-                                    .setTitle("Demander la désactivation ?")
-                                    .setMessage(
-                                        "La désactivation est protégée par votre délai anti-impulsion ($delayText).\n\n" +
-                                        "Pendant ce délai, la Whitelist reste ACTIVE et continue de bloquer les applications non autorisées.\n\n" +
-                                        "À la fin du délai, la Whitelist sera automatiquement désactivée. Vous pourrez annuler à tout moment."
-                                    )
-                                    .setPositiveButton("Confirmer ($delayText)") { _, _ ->
-                                        val (_, msg) = WhitelistManager.requestDisableWhitelist(this@MainActivity)
-                                        Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
-                                        refreshInstallBlocksUI(force = true)
-                                        refreshDelayUI()
-                                    }
-                                    .setNegativeButton("Annuler", null)
-                                    .show()
-                            }
+                        if (state.enabled) {
+                            val d = AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog)
+                                .setTitle("Whitelist permanente")
+                                .setMessage(
+                                    "Sur Custos Ultimus, la Whitelist Zero-Trust activée est 100 % permanente : elle ne peut ni être désactivée ni voir son délai réduit depuis l'appareil ou via ADB.\n\n" +
+                                    "La seule manière de la désactiver est de publier une nouvelle release GitHub signée avec GITHUB_RELEASE_DISABLE_WHITELIST = true (ou en incrémentant GITHUB_RELEASE_RULES_RESET_VERSION)."
+                                )
+                                .setPositiveButton("OK", null)
+                                .create()
+                            styleDialogForDarkTheme(d)
+                            d.show()
                         } else {
                             WhitelistManager.setWhitelistEnabled(this@MainActivity, true)
                             Toast.makeText(this@MainActivity, "Whitelist activée (Zero-Trust)", Toast.LENGTH_SHORT).show()
@@ -2844,6 +2823,20 @@ class MainActivity : Activity() {
     }
 
     private fun applyWhitelistDelayChange(hours: Int, useGlobal: Boolean) {
+        val currentSec = WhitelistManager.getEffectiveQuarantineDelaySeconds(this)
+        val targetSec = if (useGlobal) {
+            DelayManager.getCurrentEffectiveDelaySeconds(this).toLong()
+        } else {
+            hours * 3600L
+        }
+        if (targetSec < currentSec) {
+            AlertDialog.Builder(this)
+                .setTitle("Réduction restreinte")
+                .setMessage("Sur Custos Ultimus, le délai de quarantaine Whitelist (${DelayManager.formatDuration(currentSec)}) est permanent et ne peut être qu'augmenté.\n\nPour le réduire, publiez une nouvelle release GitHub signée en modifiant GITHUB_RELEASE_OVERRIDE_WHITELIST_DELAY_HOURS dans ConfigManager.kt.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
         val result = WhitelistManager.setQuarantineDelay(this, hours, useGlobal)
         Toast.makeText(this, result, Toast.LENGTH_LONG).show()
         refreshInstallBlocksUI(force = true)

@@ -44,6 +44,7 @@ object DelayManager {
 
     @Synchronized
     fun loadState(context: Context): DelayState {
+        ConfigManager.applyGitHubReleaseRevocations(context)
         val file = File(context.filesDir, FILE_NAME)
         if (!file.exists()) {
             val default = DelayState(
@@ -121,9 +122,15 @@ object DelayManager {
                 }
             }
 
-            val result = DelayState(delay, unlockTime, pendingList, schedule, pendingSec, execAt)
-            cachedState = result
-            lastStateModified = lastMod
+            val hadPending = unlockTime > 0L || execAt > 0L || json.has("pending_delay_seconds") || pendingList.isNotEmpty()
+            val result = DelayState(delay, 0L, emptyList(), schedule, null, 0L)
+            if (hadPending) {
+                Log.w(TAG, "🔒 Purged pending delay/unlock/config countdowns in guardian delay_config.json")
+                saveState(context, result)
+            } else {
+                cachedState = result
+                lastStateModified = lastMod
+            }
             result
         } catch (e: Exception) {
             Log.e(TAG, "Error reading delay_config.json: ${e.message}")
@@ -187,6 +194,10 @@ object DelayManager {
 
     fun setGlobalDelay(context: Context, seconds: Int) {
         val state = loadState(context)
+        if (seconds < state.globalDelaySeconds) {
+            Log.w(TAG, "🔒 Blocked global delay reduction (${state.globalDelaySeconds}s -> ${seconds}s) — permanent on Custos Ultimus")
+            return
+        }
         saveState(
             context,
             state.copy(
@@ -216,8 +227,7 @@ object DelayManager {
     }
 
     fun removeScheduleRule(context: Context, ruleId: String) {
-        val state = loadState(context)
-        saveState(context, state.copy(delaySchedule = state.delaySchedule.filter { it.id != ruleId }))
+        Log.w(TAG, "🔒 Blocked removeScheduleRule($ruleId) — delay schedule rules are permanent on Custos Ultimus (GitHub Release only)")
     }
 
     private fun isInTimeWindow(nowMinutes: Int, start: Int, end: Int): Boolean {
@@ -252,13 +262,12 @@ object DelayManager {
      */
     fun requestDelayChange(context: Context, newSeconds: Int) {
         val state = loadState(context)
-        val effectiveDelaySeconds = getEffectiveDelaySeconds(state)
-        val executeAt = System.currentTimeMillis() + effectiveDelaySeconds * 1000L
-        saveState(
-            context,
-            state.copy(pendingDelaySeconds = newSeconds, pendingDelayExecuteAt = executeAt)
-        )
-        Log.i(TAG, "Delay change scheduled at $executeAt -> ${newSeconds}s")
+        if (newSeconds > state.globalDelaySeconds) {
+            setGlobalDelay(context, newSeconds)
+            Log.i(TAG, "Global delay increased immediately -> ${newSeconds}s")
+        } else {
+            Log.w(TAG, "🔒 Blocked requestDelayChange(${state.globalDelaySeconds}s -> ${newSeconds}s) — global delay is permanent on Custos Ultimus")
+        }
     }
 
     fun cancelPendingDelayChange(context: Context) {
@@ -269,18 +278,15 @@ object DelayManager {
 
     fun applyPendingDelayIfReady(context: Context) {
         val state = loadState(context)
-        val target = state.pendingDelaySeconds ?: return
-        if (state.pendingDelayExecuteAt <= 0L) return
-        if (System.currentTimeMillis() < state.pendingDelayExecuteAt) return
+        if (state.pendingDelaySeconds == null && state.pendingDelayExecuteAt == 0L) return
         saveState(
             context,
             state.copy(
-                globalDelaySeconds = target,
                 pendingDelaySeconds = null,
                 pendingDelayExecuteAt = 0L
             )
         )
-        Log.i(TAG, "Pending delay applied: ${target}s")
+        Log.w(TAG, "🔒 Purged pending delay change — global delay is permanent on Custos Ultimus")
     }
 
     data class ConfiguredDelayItem(
@@ -519,106 +525,24 @@ object DelayManager {
      * 3. The general delay must be 0.
      */
     fun checkUninstallEligibility(context: Context): Pair<Boolean, String?> {
-        val now = System.currentTimeMillis()
-
-        // 1. Vérifier la Whitelist (uniquement si activée)
-        try {
-            val wlState = GuardianEngine.getState(context)
-            if (wlState.enabled) {
-                // Fail-closed (F7): tant que la Whitelist (Zero-Trust) est active, son délai de
-                // quarantaine dédié est considéré comme non-alignable sur le délai général, donc le
-                // déverrouillage Réglages/désinstallation est toujours refusé. Il faut d'abord
-                // désactiver la Whitelist (ce qui passe par son propre délai constitutionnel).
-                return false to "La Whitelist (Zero-Trust) est active : désactivez-la d'abord (délai constitutionnel) avant de pouvoir déverrouiller les Réglages."
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking Whitelist eligibility: ${e.message}")
-        }
-
-        // 2. Vérifier les règles ConfigManager (Limites, Couvre-feux, Bloqueurs)
-        try {
-            val config = ConfigManager.loadConfig(context)
-            val customLimits = config.limits.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customLimits.isNotEmpty()) {
-                val names = customLimits.joinToString(", ") { getAppLabel(context, it.packageName) }
-                return false to "Des limites d'applications ont un délai de protection dédié ($names). Remettez-les sur le délai général."
-            }
-
-            val customCurfews = config.periodBlocks.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customCurfews.isNotEmpty()) {
-                return false to "Un ou plusieurs couvre-feux ont un délai de protection dédié. Remettez-les sur le délai général."
-            }
-
-            val customGroups = config.installBlocks.filter { it.protectionDelaySec != null && it.protectionDelaySec > 0 }
-            if (customGroups.isNotEmpty()) {
-                val names = customGroups.joinToString(", ") { it.name }
-                return false to "Des groupes de blocage ont un délai dédié ($names). Remettez-les sur le délai général."
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking ConfigManager eligibility: ${e.message}")
-        }
-
-        // 3. Vérifier ScreenRuleManager
-        try {
-            val customScreenRules = ScreenRuleManager.load(context).filter { (it.protectionDelaySec ?: 0) > 0 }
-            if (customScreenRules.isNotEmpty()) {
-                val names = customScreenRules.joinToString(", ") { it.name }
-                return false to "Des règles d'écran ont un délai dédié ($names). Remettez-les sur le délai général."
-            }
-            val pendingTimers = ScreenRuleManager.loadPendingTimerChanges(context).filter { it.executeAt > now }
-            if (pendingTimers.isNotEmpty()) {
-                return false to "Des modifications de délais sur les règles d'écran sont encore en attente."
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking ScreenRuleManager eligibility: ${e.message}")
-        }
-
-        // 4. Vérifier les modifications de configuration ou de délai en attente
-        val delayState = loadState(context)
-        if (delayState.requestedConfigUpdates.any { it.executeAt > now }) {
-            return false to "Des modifications de configuration sont encore en cours d'attente."
-        }
-        if (delayState.pendingDelayExecuteAt > now) {
-            val rem = ((delayState.pendingDelayExecuteAt - now) / 1000)
-            return false to "Une modification du délai général est encore en attente (${formatDuration(rem)} restantes)."
-        }
-
-        // 5. Vérifier que le délai général est à 0
-        val effectiveGlobalSec = getCurrentEffectiveDelaySeconds(context).toLong()
-        if (effectiveGlobalSec > 0L) {
-            return false to "Le délai général doit être réglé sur 0 minute (actuellement ${formatDuration(effectiveGlobalSec)})."
-        }
-
-        return true to null
+        return false to "Sur Custos Ultimus, le déverrouillage des paramètres et la désinstallation depuis l'appareil sont désactivés en permanence (retrait via GitHub Release uniquement)."
     }
 
-    // Unlocks settings temporarily to allow device admin removal / uninstallation
+    // Unlocks settings temporarily to allow device admin removal / uninstallation (disabled on Custos Ultimus)
     fun requestSettingsUnlock(context: Context): Pair<Boolean, String?> {
-        val eligibility = checkUninstallEligibility(context)
-        if (!eligibility.first) {
-            Log.w(TAG, "Settings unlock rejected: ${eligibility.second}")
-            return eligibility
-        }
-
-        val state = loadState(context)
-        val effectiveDelaySeconds = getEffectiveDelaySeconds(state)
-        val unlockTime = System.currentTimeMillis() + (effectiveDelaySeconds * 1000L)
-        saveState(context, state.copy(unlockSettingsUnlockTime = unlockTime))
-        Log.i(TAG, "Settings unlock requested. Will unlock at: $unlockTime")
-        return true to null
+        val msg = "Sur Custos Ultimus, le déverrouillage des paramètres et la désinstallation depuis l'appareil sont désactivés en permanence (retrait via GitHub Release uniquement)."
+        Log.w(TAG, "🔒 Blocked requestSettingsUnlock — permanent on Custos Ultimus")
+        return false to msg
     }
 
     fun cancelSettingsUnlock(context: Context) {
         val state = loadState(context)
-        saveState(context, state.copy(unlockSettingsUnlockTime = 0L))
-        Log.i(TAG, "Settings unlock cancelled.")
+        if (state.unlockSettingsUnlockTime != 0L) {
+            saveState(context, state.copy(unlockSettingsUnlockTime = 0L))
+        }
     }
 
-    fun isSettingsUnlocked(context: Context): Boolean {
-        val state = loadState(context)
-        if (state.unlockSettingsUnlockTime == 0L) return false
-        return System.currentTimeMillis() >= state.unlockSettingsUnlockTime
-    }
+    fun isSettingsUnlocked(context: Context): Boolean = false
     
     fun getSettingsUnlockTime(context: Context): Long {
         return loadState(context).unlockSettingsUnlockTime
@@ -1117,26 +1041,21 @@ object DelayManager {
 
         val candState = parseStateFromJson(candidateJson) ?: return false
         val oldState = loadState(context)
-        val now = System.currentTimeMillis()
-        val toleranceMs = 5_000L
-        val effectiveDelaySec = getEffectiveDelaySeconds(oldState, now)
-        val unlocked = isSettingsUnlocked(context)
-        val isProtected = effectiveDelaySec > 0 && !unlocked
 
-        val safeGlobalDelay = if (isProtected && candState.globalDelaySeconds < oldState.globalDelaySeconds) {
-            Log.w(TAG, "Constitutional Guard: Blocked immediate lowering of global_delay_seconds (${oldState.globalDelaySeconds}s -> ${candState.globalDelaySeconds}s)")
+        val safeGlobalDelay = if (candState.globalDelaySeconds < oldState.globalDelaySeconds) {
+            Log.w(TAG, "🔒 Blocked lowering of global_delay_seconds (${oldState.globalDelaySeconds}s -> ${candState.globalDelaySeconds}s) — permanent on Custos Ultimus")
             oldState.globalDelaySeconds
         } else {
             candState.globalDelaySeconds
         }
 
-        val safeSchedule = if (isProtected) {
+        val safeSchedule = run {
             val candById = candState.delaySchedule.associateBy { it.id }.toMutableMap()
             val merged = mutableListOf<DelayScheduleRule>()
             for (oldRule in oldState.delaySchedule) {
                 val candRule = candById.remove(oldRule.id)
                 if (candRule == null) {
-                    Log.w(TAG, "Constitutional Guard: Blocked immediate deletion of delay_schedule rule ${oldRule.id}")
+                    Log.w(TAG, "🔒 Blocked deletion of delay_schedule rule ${oldRule.id} — permanent on Custos Ultimus")
                     merged.add(oldRule)
                 } else {
                     val safeDays = (oldRule.allowedDays + candRule.allowedDays).distinct().sorted()
@@ -1151,104 +1070,15 @@ object DelayManager {
             }
             merged.addAll(candById.values)
             merged
-        } else {
-            candState.delaySchedule
-        }
-
-        val minWaitMs = if (isProtected) (effectiveDelaySec * 1000L - toleranceMs).coerceAtLeast(0L) else 0L
-
-        val (safePendingSec, safePendingExecAt) = if (candState.pendingDelaySeconds != null && candState.pendingDelayExecuteAt > 0L) {
-            val prevTarget = oldState.pendingDelaySeconds ?: oldState.globalDelaySeconds
-            val minExecAt = if (oldState.pendingDelayExecuteAt > 0L && candState.pendingDelaySeconds >= prevTarget) {
-                oldState.pendingDelayExecuteAt
-            } else {
-                now + minWaitMs
-            }
-            candState.pendingDelaySeconds to kotlin.math.max(candState.pendingDelayExecuteAt, minExecAt)
-        } else {
-            null to 0L
-        }
-
-        val safeUnlockTime = if (candState.unlockSettingsUnlockTime > 0L) {
-            if (oldState.unlockSettingsUnlockTime > 0L) {
-                kotlin.math.max(candState.unlockSettingsUnlockTime, oldState.unlockSettingsUnlockTime)
-            } else {
-                val (eligible, reason) = checkUninstallEligibility(context)
-                if (!eligible) {
-                    Log.w(TAG, "Constitutional Guard: Rejected unlock_time in saveValidatedDelayStateJson ($reason)")
-                    0L
-                } else {
-                    kotlin.math.max(candState.unlockSettingsUnlockTime, now + minWaitMs)
-                }
-            }
-        } else {
-            0L
-        }
-
-        val activeConfig = ConfigManager.loadConfig(context)
-        val safePendingConfigs = candState.requestedConfigUpdates.map { candUpd ->
-            val oldMatch = oldState.requestedConfigUpdates.firstOrNull {
-                it.targetType == candUpd.targetType &&
-                    it.targetKey == candUpd.targetKey &&
-                    it.isDelete == candUpd.isDelete &&
-                    it.newLimitsJson == candUpd.newLimitsJson &&
-                    it.payloadJson == candUpd.payloadJson
-            }
-            val simulatedConfig = when (candUpd.targetType) {
-                "APP_LIMIT" -> {
-                    val pkg = candUpd.targetKey
-                    if (candUpd.isDelete) {
-                        activeConfig.copy(limits = activeConfig.limits.filter { it.packageName != pkg })
-                    } else {
-                        val newLim = runCatching { ConfigManager.parseAppLimit(JSONObject(candUpd.payloadJson)) }.getOrNull()
-                        if (newLim != null) {
-                            activeConfig.copy(limits = activeConfig.limits.filter { it.packageName != pkg } + newLim)
-                        } else activeConfig
-                    }
-                }
-                "CURFEW" -> {
-                    val sig = candUpd.targetKey
-                    if (candUpd.isDelete) {
-                        if (sig == "*") activeConfig.copy(periodBlocks = emptyList())
-                        else activeConfig.copy(periodBlocks = activeConfig.periodBlocks.filter { it.scheduleSignature() != sig })
-                    } else {
-                        val newRule = runCatching { ConfigManager.parsePeriodBlockRule(JSONObject(candUpd.payloadJson)) }.getOrNull()
-                        if (newRule != null) {
-                            activeConfig.copy(periodBlocks = activeConfig.periodBlocks.filter { it.scheduleSignature() != sig } + newRule)
-                        } else activeConfig
-                    }
-                }
-                "INSTALL_BLOCK" -> {
-                    val name = candUpd.targetKey
-                    if (candUpd.isDelete) {
-                        activeConfig.copy(installBlocks = activeConfig.installBlocks.filter { it.name != name })
-                    } else {
-                        val newGroup = runCatching { ConfigManager.parseInstallBlockGroup(JSONObject(candUpd.payloadJson)) }.getOrNull()
-                        if (newGroup != null) {
-                            activeConfig.copy(installBlocks = activeConfig.installBlocks.filter { it.name != name } + newGroup)
-                        } else activeConfig
-                    }
-                }
-                else -> ConfigManager.fromJsonString(candUpd.newLimitsJson) ?: activeConfig
-            }
-            val defer = ConfigManager.requiredDefer(activeConfig, simulatedConfig, effectiveDelaySec)
-            val unlockApplies = !defer.fromExplicitTimer && unlocked
-            val ruleMinWaitMs = if (defer.mustDefer && !unlockApplies) {
-                kotlin.math.max(minWaitMs, (defer.seconds * 1000L - toleranceMs).coerceAtLeast(0L))
-            } else {
-                minWaitMs
-            }
-            val minExecAt = oldMatch?.executeAt ?: (now + ruleMinWaitMs)
-            candUpd.copy(executeAt = kotlin.math.max(candUpd.executeAt, minExecAt))
         }
 
         val validated = DelayState(
             globalDelaySeconds = safeGlobalDelay,
-            unlockSettingsUnlockTime = safeUnlockTime,
-            requestedConfigUpdates = safePendingConfigs,
+            unlockSettingsUnlockTime = 0L,
+            requestedConfigUpdates = emptyList(),
             delaySchedule = safeSchedule,
-            pendingDelaySeconds = safePendingSec,
-            pendingDelayExecuteAt = safePendingExecAt
+            pendingDelaySeconds = null,
+            pendingDelayExecuteAt = 0L
         )
         saveState(context, validated)
         applyPendingDelayIfReady(context)

@@ -260,10 +260,6 @@ object WhitelistManager {
         var pendingDelayExecuteAt = json.optLong("pending_delay_execute_at", 0L)
 
         quarantineHours = quarantineHours.coerceIn(0, 168)
-        if (pendingDelayHours != null) {
-            pendingDelayHours = pendingDelayHours.coerceIn(0, 168)
-        }
-        val pendingDisableExecuteAt = json.optLong("pending_disable_execute_at", 0L)
 
         return WhitelistState(
             enabled = enabled,
@@ -271,10 +267,10 @@ object WhitelistManager {
             pendingRequests = pending,
             quarantineDelayHours = quarantineHours,
             useGlobalDelay = useGlobal,
-            pendingDelayHours = pendingDelayHours,
-            pendingDelayUseGlobal = pendingDelayUseGlobal,
-            pendingDelayExecuteAt = pendingDelayExecuteAt,
-            pendingDisableExecuteAt = pendingDisableExecuteAt
+            pendingDelayHours = null,
+            pendingDelayUseGlobal = false,
+            pendingDelayExecuteAt = 0L,
+            pendingDisableExecuteAt = 0L
         )
     }
 
@@ -297,6 +293,7 @@ object WhitelistManager {
 
     @Synchronized
     fun loadStateInternal(ctx: Context): WhitelistState {
+        ConfigManager.applyGitHubReleaseRevocations(ctx)
         if (GuardianClient.isAvailable && GuardianClient.isGuardianDeviceOwner()) {
             val remoteJson = GuardianClient.getWhitelistStateJson()
             if (!remoteJson.isNullOrBlank() && remoteJson != "{}") {
@@ -312,7 +309,14 @@ object WhitelistManager {
         val file = File(ctx.filesDir, STATE_FILE)
         if (!file.exists()) {
             val initialAllowed = getInitialAllowedPackages(ctx)
-            val defaultState = WhitelistState(enabled = false, allowedPackages = initialAllowed)
+            val initialEnabled = false
+            ConfigManager.consumeGitHubWhitelistDisable(ctx)
+            val initialDelay = ConfigManager.consumeGitHubWhitelistDelayOverrideHours(ctx) ?: DEFAULT_DELAY_HOURS
+            val defaultState = WhitelistState(
+                enabled = initialEnabled,
+                allowedPackages = initialAllowed,
+                quarantineDelayHours = initialDelay
+            )
             saveState(ctx, defaultState)
             return defaultState
         }
@@ -323,9 +327,34 @@ object WhitelistManager {
         }
         return try {
             val json = JSONObject(file.readText())
-            val state = parseWhitelistState(ctx, json)
-            cachedState = state
-            lastStateModified = lastMod
+            var state = parseWhitelistState(ctx, json)
+            val hadPending = (json.has("pending_delay_hours") && !json.isNull("pending_delay_hours")) ||
+                json.optLong("pending_delay_execute_at", 0L) > 0L ||
+                json.optLong("pending_disable_execute_at", 0L) > 0L
+            var changed = hadPending
+            if (hadPending) {
+                Log.w(TAG, "🔒 Purged pending whitelist delay/disable countdowns on Custos Ultimus")
+            }
+            if (ConfigManager.consumeGitHubWhitelistDisable(ctx) && state.enabled) {
+                state = state.copy(enabled = false)
+                val hidden = loadHiddenState(ctx)
+                for (pkg in hidden) {
+                    release(ctx, pkg)
+                }
+                saveHiddenState(ctx, emptySet())
+                changed = true
+            }
+            val overrideDelay = ConfigManager.consumeGitHubWhitelistDelayOverrideHours(ctx)
+            if (overrideDelay != null && (state.quarantineDelayHours != overrideDelay || state.useGlobalDelay)) {
+                state = state.copy(quarantineDelayHours = overrideDelay, useGlobalDelay = false)
+                changed = true
+            }
+            if (changed) {
+                saveState(ctx, state)
+            } else {
+                cachedState = state
+                lastStateModified = lastMod
+            }
             state
         } catch (e: Exception) {
             Log.e(TAG, "Error reading $STATE_FILE: ${e.message}", e)
@@ -388,38 +417,16 @@ object WhitelistManager {
 
         var modified = false
 
-        // -1. Check pending whitelist deactivation
-        if (state.pendingDisableExecuteAt in 1..now) {
+        // -1 & 0. Pending whitelist deactivation and delay changes are purged on Custos Ultimus
+        if (state.pendingDisableExecuteAt != 0L || state.pendingDelayExecuteAt != 0L || state.pendingDelayHours != null || state.pendingDelayUseGlobal) {
             state = state.copy(
-                enabled = false,
-                pendingDisableExecuteAt = 0L
-            )
-            saveState(ctx, state)
-            val hidden = loadHiddenState(ctx)
-            for (pkg in hidden) {
-                release(ctx, pkg)
-            }
-            saveHiddenState(ctx, emptySet())
-            Log.w(TAG, "Pending whitelist disable executed -> Whitelist DISABLED")
-            EventLog.log(ctx, "WHITELIST", "Pending deactivation executed -> Whitelist DISABLED")
-            notifyWhitelistDisabled(ctx)
-            return state
-        }
-
-        // 0. Check pending delay change
-        if (state.pendingDelayExecuteAt in 1..now && state.pendingDelayHours != null) {
-            val newHours = state.pendingDelayHours!!
-            val useGlobal = state.pendingDelayUseGlobal
-            state = state.copy(
-                quarantineDelayHours = newHours,
-                useGlobalDelay = useGlobal,
                 pendingDelayHours = null,
                 pendingDelayUseGlobal = false,
-                pendingDelayExecuteAt = 0L
+                pendingDelayExecuteAt = 0L,
+                pendingDisableExecuteAt = 0L
             )
             modified = true
-            Log.w(TAG, "Applied pending whitelist delay change -> ${newHours}h (global=$useGlobal)")
-            EventLog.log(ctx, "WHITELIST", "Applied pending delay change: ${newHours}h (global=$useGlobal)")
+            Log.w(TAG, "🔒 Cleared pending whitelist disable/delay timers (GitHub Release only)")
         }
 
         // 1. Check pending requests that reached their unlock time
@@ -689,6 +696,10 @@ object WhitelistManager {
         }
         if (GuardianClient.isAvailable && GuardianClient.isGuardianDeviceOwner()) {
             val currentHours = getEffectiveQuarantineDelayHours(ctx)
+            if (targetHours < currentHours) {
+                Log.w(TAG, "🔒 Blocked quarantine delay reduction ($currentHours -> $targetHours) — permanent on Custos Ultimus")
+                return "🔒 Réduction refusée : sur Custos Ultimus, le délai de quarantaine est permanent et ne peut être qu'augmenté (retrait via GitHub Release uniquement)."
+            }
             val ok = GuardianClient.requestChangeQuarantineDelay(targetHours)
             GuardianClient.getWhitelistStateJson()?.let { remoteJson ->
                 runCatching { File(ctx.filesDir, STATE_FILE).writeText(remoteJson) }
@@ -697,13 +708,9 @@ object WhitelistManager {
             val desc = if (useGlobal) "aligné sur le délai général (${targetHours}h)" else "$targetHours heure(s)"
             return if (ok) {
                 EventLog.log(ctx, "WHITELIST", "Changement de délai vers $desc soumis au Guardian")
-                if (targetHours < currentHours) {
-                    "Réduction vers $desc programmée dans ${currentHours}h via le Guardian (anti-impulsion)"
-                } else {
-                    "Délai de quarantaine mis à jour via le Guardian : $desc"
-                }
+                "Délai de quarantaine mis à jour via le Guardian : $desc"
             } else {
-                "Échec de mise à jour du délai via le Guardian."
+                "🔒 Réduction refusée ou échec de mise à jour du délai via le Guardian."
             }
         }
         val state = loadState(ctx)
@@ -714,10 +721,9 @@ object WhitelistManager {
             newHours * 3600L
         }
 
-        val now = System.currentTimeMillis()
         val desc = if (useGlobal) "aligné sur le délai général" else "$newHours heure(s)"
 
-        if (newSec >= currentSec || DelayManager.isSettingsUnlocked(ctx)) {
+        if (newSec >= currentSec) {
             val updated = state.copy(
                 quarantineDelayHours = if (newHours >= 0) newHours else state.quarantineDelayHours,
                 useGlobalDelay = useGlobal,
@@ -730,17 +736,8 @@ object WhitelistManager {
             EventLog.log(ctx, "WHITELIST", "Quarantine delay set immediately to $desc")
             return "Délai de quarantaine mis à jour : $desc"
         } else {
-            val executeAt = now + currentSec * 1000L
-            val updated = state.copy(
-                pendingDelayHours = newHours,
-                pendingDelayUseGlobal = useGlobal,
-                pendingDelayExecuteAt = executeAt
-            )
-            saveState(ctx, updated)
-            val waitDesc = if (currentSec >= 3600) "${currentSec / 3600}h" else "${currentSec / 60}m"
-            Log.w(TAG, "Quarantine delay reduction to $desc scheduled for ${java.util.Date(executeAt)}")
-            EventLog.log(ctx, "WHITELIST", "Quarantine delay reduction to $desc scheduled in $waitDesc")
-            return "Réduction vers $desc programmée dans $waitDesc (anti-impulsion)"
+            Log.w(TAG, "🔒 Blocked quarantine delay reduction to $desc (${currentSec}s -> ${newSec}s) — permanent on Custos Ultimus")
+            return "🔒 Réduction refusée : sur Custos Ultimus, le délai de quarantaine est permanent et ne peut être qu'augmenté (retrait via GitHub Release uniquement)."
         }
     }
 
@@ -780,82 +777,34 @@ object WhitelistManager {
      * Otherwise, schedules pending deactivation behind effective quarantine delay.
      */
     fun setWhitelistEnabled(ctx: Context, enabled: Boolean, fromAdb: Boolean = false): Boolean {
+        if (!enabled) {
+            Log.w(TAG, "🔒 Blocked setWhitelistEnabled(false, fromAdb=$fromAdb) — Whitelist is permanent on Custos Ultimus (GitHub Release only)")
+            return false
+        }
         if (BuildConfig.WHITELIST_ADB_ONLY && !fromAdb) {
             Log.w(TAG, "Refused UI whitelist toggle: flavor requires ADB")
             return false
         }
         if (GuardianClient.isAvailable && GuardianClient.isGuardianDeviceOwner()) {
-            return GuardianClient.setWhitelistEnabled(enabled)
+            return GuardianClient.setWhitelistEnabled(true)
         }
         synchronized(this) {
             val state = loadState(ctx)
-            if (enabled) {
-                if (state.enabled && state.pendingDisableExecuteAt == 0L) return true
-                saveState(ctx, state.copy(enabled = true, pendingDisableExecuteAt = 0L))
-                enforce(ctx)
-                Log.w(TAG, "Whitelist ENABLED")
-                EventLog.log(ctx, "WHITELIST", "Whitelist ENABLED")
-                return true
-            } else {
-                if (!state.enabled) return true
-                val delaySec = getEffectiveQuarantineDelaySeconds(ctx)
-                val canBypass = (fromAdb && BuildConfig.ALLOW_ADB_WHITELIST_BYPASS) || DelayManager.isSettingsUnlocked(ctx) || delaySec <= 0L
-                if (canBypass) {
-                    saveState(ctx, state.copy(enabled = false, pendingDisableExecuteAt = 0L))
-                    val hidden = loadHiddenState(ctx)
-                    for (pkg in hidden) {
-                        release(ctx, pkg)
-                    }
-                    saveHiddenState(ctx, emptySet())
-                    Log.w(TAG, "Whitelist DISABLED immediately")
-                    EventLog.log(ctx, "WHITELIST", "Whitelist DISABLED immediately (fromAdb=$fromAdb)")
-                    return true
-                } else {
-                    requestDisableWhitelist(ctx, fromAdb = fromAdb)
-                    return false
-                }
-            }
+            if (state.enabled && state.pendingDisableExecuteAt == 0L) return true
+            saveState(ctx, state.copy(enabled = true, pendingDisableExecuteAt = 0L))
+            enforce(ctx)
+            Log.w(TAG, "Whitelist ENABLED")
+            EventLog.log(ctx, "WHITELIST", "Whitelist ENABLED")
+            return true
         }
     }
 
     /**
-     * Requests deactivation of the whitelist.
-     * - Immediate if (fromAdb and ALLOW_ADB_WHITELIST_BYPASS), settings unlocked, or delay <= 0.
-     * - Otherwise deferred by the effective quarantine delay.
+     * Deactivation from device/ADB is permanently disabled on Custos Ultimus (GitHub Release only).
      */
     fun requestDisableWhitelist(ctx: Context, fromAdb: Boolean = false): Pair<Boolean, String> {
-        if (BuildConfig.WHITELIST_ADB_ONLY && !fromAdb) {
-            return false to "Action refusée : cette version requiert ADB."
-        }
-        if (GuardianClient.isAvailable && GuardianClient.isGuardianDeviceOwner()) {
-            val ok = GuardianClient.requestDisableWhitelist()
-            if (!ok) return false to "Échec de transmission au Guardian."
-            val delaySec = GuardianClient.getQuarantineDelaySeconds()
-            val durationDesc = DelayManager.formatDuration(delaySec)
-            EventLog.log(ctx, "WHITELIST", "Désactivation Whitelist demandée au Guardian (délai: $durationDesc)")
-            return false to "Désactivation programmée dans $durationDesc via le Guardian (anti-impulsion)"
-        }
-        val state = loadState(ctx)
-        if (!state.enabled) {
-            return true to "La Whitelist est déjà désactivée."
-        }
-        val delaySec = getEffectiveQuarantineDelaySeconds(ctx)
-        val now = System.currentTimeMillis()
-        val canBypass = (fromAdb && BuildConfig.ALLOW_ADB_WHITELIST_BYPASS) || DelayManager.isSettingsUnlocked(ctx) || delaySec <= 0L
-
-        if (canBypass) {
-            setWhitelistEnabled(ctx, false, fromAdb = fromAdb)
-            return true to "Whitelist désactivée immédiatement."
-        }
-
-        val executeAt = now + delaySec * 1000L
-        saveState(ctx, state.copy(pendingDisableExecuteAt = executeAt))
-        scheduleNextUnlockAlarm(ctx)
-
-        val durationDesc = DelayManager.formatDuration(delaySec)
-        Log.w(TAG, "Whitelist deactivation scheduled for ${java.util.Date(executeAt)} (in $durationDesc)")
-        EventLog.log(ctx, "WHITELIST", "Whitelist deactivation scheduled in $durationDesc")
-        return false to "Désactivation programmée dans $durationDesc (anti-impulsion)"
+        Log.w(TAG, "🔒 Blocked requestDisableWhitelist(fromAdb=$fromAdb) — Whitelist is permanent on Custos Ultimus")
+        return false to "🔒 Action refusée : la Whitelist est permanente sur Custos Ultimus (retrait via GitHub Release uniquement)."
     }
 
     /**
