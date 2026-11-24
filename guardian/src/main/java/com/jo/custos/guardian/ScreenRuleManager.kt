@@ -283,8 +283,17 @@ object ScreenRuleManager {
     }
 
     fun load(ctx: Context): List<ScreenRule> {
+        ConfigManager.applyGitHubReleaseRevocations(ctx)
         val arr = readRoot(ctx).optJSONArray("rules") ?: return emptyList()
-        return (0 until arr.length()).mapNotNull { i -> parseRule(arr.getJSONObject(i)) }
+        val parsed = (0 until arr.length()).mapNotNull { i -> parseRule(arr.getJSONObject(i)) }
+        val revoked = ConfigManager.GITHUB_RELEASE_REVOKED_SCREEN_RULES
+        if (revoked.isEmpty()) return parsed
+        val filtered = parsed.filterNot { it.name in revoked || it.packageName in revoked }
+        if (filtered.size != parsed.size) {
+            save(ctx, filtered)
+            Log.w(TAG, "Applied targeted GitHub Release screen rule revocations")
+        }
+        return filtered
     }
 
     /**
@@ -471,6 +480,10 @@ object ScreenRuleManager {
      * Returns true if a rule was actually removed.
      */
     fun removeImmediate(ctx: Context, name: String): Boolean {
+        if (PERMANENT_ON_THIS_FLAVOR) {
+            Log.w(TAG, "Immediate removal refused (permanent flavor): $name")
+            return false
+        }
         if (load(ctx).none { it.name == name }) return false
         cancelRemoval(ctx, name)
         cancelTimerChange(ctx, name)

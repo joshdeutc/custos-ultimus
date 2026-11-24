@@ -131,14 +131,71 @@ class ConfigManager {
     companion object {
         private const val TAG = "SelfControl.Config"
         private const val LOCAL_CONFIG_NAME = "limits.json"
+        private const val REVOCATION_PREFS = "custos_release_revocations"
+        private const val PREF_APPLIED_RULES_RESET_VERSION = "applied_rules_reset_version"
         const val TETHERING_VIRTUAL_PACKAGE = "@system:tethering"
         const val INTERNET_VIRTUAL_PACKAGE = "@system:internet"
+
+        /**
+         * CUSTOS ULTIMUS — RETRAIT DE RÈGLES PAR GITHUB RELEASE UNIQUEMENT
+         * Incrémenter GITHUB_RELEASE_RULES_RESET_VERSION pour purger toutes les règles lors d'une release,
+         * ou renseigner les packages/noms ci-dessous pour retirer des règles ciblées dans une nouvelle release.
+         */
+        const val GITHUB_RELEASE_RULES_RESET_VERSION: Int = 1
+        val GITHUB_RELEASE_REVOKED_LIMIT_PACKAGES: Set<String> = emptySet()
+        val GITHUB_RELEASE_REVOKED_CURFEW_PACKAGES: Set<String> = emptySet()
+        val GITHUB_RELEASE_REVOKED_SCREEN_RULES: Set<String> = emptySet()
+
+        @Volatile
+        private var revocationsChecked = false
+
+        fun applyGitHubReleaseRevocations(context: Context) {
+            if (revocationsChecked) return
+            synchronized(this) {
+                if (revocationsChecked) return
+                val prefs = context.getSharedPreferences(REVOCATION_PREFS, Context.MODE_PRIVATE)
+                val appliedVersion = prefs.getInt(PREF_APPLIED_RULES_RESET_VERSION, 1)
+                if (appliedVersion < GITHUB_RELEASE_RULES_RESET_VERSION) {
+                    runCatching { File(context.filesDir, LOCAL_CONFIG_NAME).delete() }
+                    runCatching { File(context.filesDir, "screen_rules.json").delete() }
+                    runCatching { DelayManager.cancelConfigUpdates(context) }
+                    prefs.edit().putInt(PREF_APPLIED_RULES_RESET_VERSION, GITHUB_RELEASE_RULES_RESET_VERSION).apply()
+                    Log.w(TAG, "🔄 Applied GitHub Release rules reset v$GITHUB_RELEASE_RULES_RESET_VERSION")
+                }
+                revocationsChecked = true
+            }
+        }
+
+        private fun filterRevokedConfig(context: Context, cfg: Config): Config {
+            if (GITHUB_RELEASE_REVOKED_LIMIT_PACKAGES.isEmpty() && GITHUB_RELEASE_REVOKED_CURFEW_PACKAGES.isEmpty()) {
+                return cfg
+            }
+            val newLimits = if (GITHUB_RELEASE_REVOKED_LIMIT_PACKAGES.isEmpty()) cfg.limits
+            else cfg.limits.filterNot { it.packageName in GITHUB_RELEASE_REVOKED_LIMIT_PACKAGES }
+
+            val newCurfews = if (GITHUB_RELEASE_REVOKED_CURFEW_PACKAGES.isEmpty()) cfg.periodBlocks
+            else cfg.periodBlocks.mapNotNull { rule ->
+                val rem = rule.packages.filterNot { it in GITHUB_RELEASE_REVOKED_CURFEW_PACKAGES }
+                when {
+                    rem.isEmpty() -> null
+                    rem.size == rule.packages.size -> rule
+                    else -> rule.copy(packages = rem)
+                }
+            }
+            val filtered = cfg.copy(limits = newLimits, periodBlocks = newCurfews)
+            if (filtered != cfg) {
+                saveConfig(context, filtered)
+                Log.w(TAG, "🔄 Applied targeted GitHub Release rule revocations")
+            }
+            return filtered
+        }
 
         /**
          * Load configuration from internal storage.
          * Missing or invalid file yields an empty config (fresh install / clean slate).
          */
         fun loadConfig(context: Context): Config {
+            applyGitHubReleaseRevocations(context)
             if (GuardianClient.isAvailable) {
                 val remoteJson = GuardianClient.getConfigJson()
                 if (!remoteJson.isNullOrEmpty()) {
@@ -159,7 +216,7 @@ class ConfigManager {
 
             return try {
                 val json = JSONObject(localFile.readText())
-                parseConfig(json)
+                filterRevokedConfig(context, parseConfig(json))
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error parsing config: ${e.message}")
                 Config(emptyList(), emptyList())
@@ -183,7 +240,12 @@ class ConfigManager {
          * Save configuration directly to the internal storage.
          */
         fun saveConfig(context: Context, config: Config) {
-            val jsonStr = configToJsonString(config)
+            val safeConfig = if (GuardianClient.isAvailable) {
+                config
+            } else {
+                enforcePermanentRules(loadConfig(context), config)
+            }
+            val jsonStr = configToJsonString(safeConfig)
             if (GuardianClient.isAvailable) {
                 GuardianClient.requestConfigChange(jsonStr)
             }
@@ -320,6 +382,62 @@ class ConfigManager {
         /**
          * Calculates the defer requirement specifically for a single app limit.
          */
+        fun isAppLimitRelaxed(oldLimit: AppLimit, newLimit: AppLimit): Boolean {
+            if (newLimit.maxSecondsPerDay > oldLimit.maxSecondsPerDay) return true
+            if (isAllowedScheduleRelaxed(oldLimit, newLimit)) return true
+            if (isSessionRelaxation(oldLimit.session, newLimit.session)) return true
+            if (isTimerLowered(oldLimit.protectionDelaySec, newLimit.protectionDelaySec)) return true
+            return false
+        }
+
+        fun enforcePermanentRules(old: Config, candidate: Config): Config {
+            val resultLimits = if (BuildConfig.PERMANENT_APP_LIMITS) {
+                val oldByPkg = old.limits.associateBy { it.packageName }
+                val candByPkg = candidate.limits.associateBy { it.packageName }
+                val merged = mutableListOf<AppLimit>()
+                for (oldLimit in old.limits) {
+                    val candLimit = candByPkg[oldLimit.packageName]
+                    if (candLimit == null || isAppLimitRelaxed(oldLimit, candLimit)) {
+                        merged.add(oldLimit)
+                    } else {
+                        merged.add(candLimit)
+                    }
+                }
+                for (candLimit in candidate.limits) {
+                    if (candLimit.packageName !in oldByPkg) {
+                        merged.add(candLimit)
+                    }
+                }
+                merged
+            } else {
+                candidate.limits
+            }
+
+            val resultCurfews = if (BuildConfig.PERMANENT_CURFEW) {
+                val kept = candidate.periodBlocks.map { cand ->
+                    val oldTwin = old.periodBlocks.firstOrNull { it.scheduleSignature() == cand.scheduleSignature() }
+                    if (oldTwin != null && isTimerLowered(oldTwin.protectionDelaySec, cand.protectionDelaySec)) {
+                        cand.copy(protectionDelaySec = oldTwin.protectionDelaySec)
+                    } else cand
+                }.toMutableList()
+                for (oldRule in old.periodBlocks) {
+                    if (losesBlockedMinutes(oldRule, kept)) {
+                        val idx = kept.indexOfFirst { it.scheduleSignature() == oldRule.scheduleSignature() }
+                        if (idx >= 0) {
+                            kept[idx] = oldRule
+                        } else {
+                            kept.add(oldRule)
+                        }
+                    }
+                }
+                kept
+            } else {
+                candidate.periodBlocks
+            }
+
+            return candidate.copy(limits = resultLimits, periodBlocks = resultCurfews)
+        }
+
         fun requiredDeferForAppLimit(oldLimit: AppLimit?, newLimit: AppLimit?, globalDelaySec: Int): DeferRequirement {
             if (oldLimit == null) return DeferRequirement.NONE
             val candidates = mutableListOf<DeferRequirement>()

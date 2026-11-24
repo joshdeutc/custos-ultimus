@@ -1546,9 +1546,8 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
                             .setTitle("Augmentation restreinte")
                             .setMessage(
-                                "Sur cette version, les limites d'applications sont permanentes. Seule la réduction du quota est autorisée depuis l'appareil.\n\n" +
-                                "Pour augmenter le quota, utilisez la commande ADB :\n" +
-                                "adb shell am broadcast -p com.jo.selfcontrol.ultimate -a com.jo.selfcontrol.ultimate.SET_APP_LIMIT --es pkg \"$pkg\" --ei minutes $newMins"
+                                "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                                "La seule manière de retirer ou d'assouplir cette règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée."
                             )
                             .setPositiveButton("OK", null)
                             .create().also { styleDialogForDarkTheme(it); it.show() }
@@ -1558,8 +1557,8 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
                             .setTitle("Session restreinte")
                             .setMessage(
-                                "Sur cette version, vous ne pouvez pas désactiver une limite de session active depuis l'appareil.\n\n" +
-                                "Pour modifier ou retirer cette règle, utilisez ADB."
+                                "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                                "La seule manière de retirer cette règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée."
                             )
                             .setPositiveButton("OK", null)
                             .create().also { styleDialogForDarkTheme(it); it.show() }
@@ -1573,8 +1572,8 @@ class MainActivity : Activity() {
                             AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
                                 .setTitle("Assouplissement restreint")
                                 .setMessage(
-                                    "Sur cette version, vous ne pouvez pas assouplir la session (durée plus longue, cooldown plus court ou plus de sessions) depuis l'appareil.\n\n" +
-                                    "Pour assouplir cette règle, utilisez ADB."
+                                    "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                                    "La seule manière de retirer ou d'assouplir cette règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée."
                                 )
                                 .setPositiveButton("OK", null)
                                 .create().also { styleDialogForDarkTheme(it); it.show() }
@@ -1634,13 +1633,12 @@ class MainActivity : Activity() {
 
         if (existingLimit != null || activeLimit != null) {
             if (BuildConfig.PERMANENT_APP_LIMITS) {
-                builder.setNeutralButton("🔒 Suppr. via ADB") { _, _ ->
+                builder.setNeutralButton("🔒 Règle permanente") { _, _ ->
                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
                         .setTitle("Suppression protégée")
                         .setMessage(
-                            "Sur cette version, les limites d'applications sont permanentes et ne peuvent pas être supprimées depuis l'appareil.\n\n" +
-                            "Pour supprimer cette limite, connectez le téléphone en ADB et exécutez :\n\n" +
-                            "adb shell am broadcast -p com.jo.selfcontrol.ultimate -a com.jo.selfcontrol.ultimate.REMOVE_APP_LIMIT --es pkg \"$pkg\""
+                            "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                            "La seule manière de retirer une règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée."
                         )
                         .setPositiveButton("OK", null)
                         .create().also { styleDialogForDarkTheme(it); it.show() }
@@ -1929,7 +1927,7 @@ class MainActivity : Activity() {
             })
             if (BuildConfig.PERMANENT_CURFEW) {
                 addView(TextView(this@MainActivity).apply {
-                    text = "🔒 Permanente (Suppression via ADB)"
+                    text = "🔒 Permanente (retrait via GitHub Release uniquement)"
                     textSize = 12f
                     typeface = Typeface.DEFAULT_BOLD
                     setTextColor(Color.parseColor("#7B1FA2"))
@@ -2020,7 +2018,7 @@ class MainActivity : Activity() {
             }
             if (BuildConfig.PERMANENT_CURFEW) {
                 buttonRow.addView(Button(this@MainActivity).apply {
-                    text = "🔒 Suppr. via ADB"
+                    text = "🔒 Règle permanente"
                     setTextColor(Color.WHITE)
                     background = roundedBackground(Color.parseColor("#7B1FA2"))
                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2029,10 +2027,9 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog)
                             .setTitle("Couvre-feu permanent")
                             .setMessage(
-                                "Sur cette version, les règles de couvre-feu sont permanentes et ne peuvent pas être supprimées ou modifiées depuis l'appareil.\n\n" +
-                                "Règle : $apps ($start -> $end)\n\n" +
-                                "Pour la supprimer via ADB, connectez le téléphone au PC et exécutez :\n\n" +
-                                "adb shell am broadcast -p com.jo.selfcontrol.ultimate -a com.jo.selfcontrol.ultimate.REMOVE_CURFEW --ei index $index"
+                                "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                                "La seule manière de retirer une règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée.\n\n" +
+                                "Règle : $apps ($start -> $end)"
                             )
                             .setPositiveButton("OK", null)
                             .create().also { styleDialogForDarkTheme(it); it.show() }
@@ -4885,7 +4882,7 @@ class MainActivity : Activity() {
 
                 addView(TextView(this@MainActivity).apply {
                     text = if (ScreenRuleManager.PERMANENT_ON_THIS_FLAVOR) {
-                        "🔒 Permanent sur ce build (retrait ADB uniquement)"
+                        "🔒 Permanente (retrait via GitHub Release uniquement)"
                     } else if (pendingTimer != null) {
                         val targetLabel = protectionTimerLabel(pendingTimer.targetDelaySec)
                         val remainingSec = kotlin.math.max(0, ((pendingTimer.executeAt - System.currentTimeMillis()) / 1000).toInt())
@@ -4999,12 +4996,12 @@ class MainActivity : Activity() {
         when (val outcome = ScreenRuleManager.requestRemoval(this, rule.name)) {
             is ScreenRuleManager.RemovalOutcome.Permanent -> {
                 AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog)
-                    .setTitle("Permanent rule")
+                    .setTitle("Règle permanente")
                     .setMessage(
-                        "On this build a partial-access rule can no longer be removed from the " +
-                            "phone once created — only via adb from a PC. That is deliberate."
+                        "Sur Custos Ultimus, toute règle ajoutée est permanente (seul le durcissement est autorisé). " +
+                            "La seule manière de retirer une règle est de publier une nouvelle version signée de l'application sur GitHub dans laquelle la règle a été retirée."
                     )
-                    .setPositiveButton("Got it", null)
+                    .setPositiveButton("Compris", null)
                     .show()
             }
             is ScreenRuleManager.RemovalOutcome.Immediate ->
@@ -5107,7 +5104,7 @@ class MainActivity : Activity() {
             layout.addView(timerRow)
         } else {
             layout.addView(TextView(this).apply {
-                text = "🔒 Permanent sur le flavor me — le retrait se fait uniquement par commande adb."
+                text = "🔒 Permanente (retrait via GitHub Release uniquement)"
                 setTextColor(Color.parseColor("#D32F2F"))
                 textSize = 12f
                 setPadding(0, dp(12), 0, dp(4))

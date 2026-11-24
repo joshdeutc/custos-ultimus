@@ -67,6 +67,14 @@ class GuardianWatcherService : AccessibilityService() {
             "Désactiver cette application", "Désactiver l'administrateur", "Deactivate"
         )
 
+        private val FACTORY_RESET_TEXTS = setOf(
+            "Réinitialiser toutes les données",
+            "Effacer toutes les données",
+            "Factory data reset",
+            "Erase all data",
+            "Réinitialisation d'usine"
+        )
+
         private const val HOME_COOLDOWN_MS = 500L
         private const val SCREEN_RULE_SCAN_INTERVAL_MS = 80L
         private const val SCREEN_RULE_REDIRECT_COOLDOWN_MS = 500L
@@ -284,9 +292,22 @@ class GuardianWatcherService : AccessibilityService() {
                 return
             }
 
-            // 2. Settings & Uninstaller protection
+            // 2. Factory reset & Settings / Uninstaller protection
+            val cls = event.className?.toString() ?: ""
+            if (pkg in SETTINGS_PACKAGES || pkg == "android") {
+                val root = rootInActiveWindow
+                try {
+                    if (isFactoryResetScreen(cls, root)) {
+                        if (root != null) clickCancelIfPresent(root)
+                        goHome("Factory reset screen blocked ($cls)")
+                        return
+                    }
+                } finally {
+                    root?.recycle()
+                }
+            }
+
             if (!DelayManager.isSettingsUnlocked(this)) {
-                val cls = event.className?.toString() ?: ""
                 val isDialog = cls.contains("Dialog", ignoreCase = true) || cls.contains("Popup", ignoreCase = true)
                 if (pkg in SETTINGS_PACKAGES || pkg in UNINSTALL_PACKAGES || (pkg == "android" && isDialog)) {
                     if (isSensitiveSettingsScreen(cls) || pkg in UNINSTALL_PACKAGES) {
@@ -315,6 +336,35 @@ class GuardianWatcherService : AccessibilityService() {
         } catch (t: Throwable) {
             Log.e(TAG, "Error in GuardianWatcherService.onAccessibilityEvent", t)
         }
+    }
+
+    private fun isFactoryResetScreen(className: CharSequence?, rootNode: AccessibilityNodeInfo?): Boolean {
+        val cls = className?.toString() ?: ""
+        if (cls.contains("FactoryReset", ignoreCase = true)
+            || cls.contains("MasterClear", ignoreCase = true)
+            || cls.contains("ResetDashboard", ignoreCase = true)
+            || cls.contains("ResetSettings", ignoreCase = true)
+        ) {
+            return true
+        }
+        if (rootNode == null) return false
+        for (phrase in FACTORY_RESET_TEXTS) {
+            val nodes = rootNode.findAccessibilityNodeInfosByText(phrase)
+            if (!nodes.isNullOrEmpty()) {
+                var matched = false
+                for (node in nodes) {
+                    val text = node.text?.toString()?.trim() ?: ""
+                    val desc = node.contentDescription?.toString()?.trim() ?: ""
+                    if (text.contains(phrase, ignoreCase = true) || desc.contains(phrase, ignoreCase = true)) {
+                        matched = true
+                        break
+                    }
+                }
+                nodes.forEach { it.recycle() }
+                if (matched) return true
+            }
+        }
+        return false
     }
 
     private fun isSensitiveSettingsScreen(className: CharSequence?): Boolean {

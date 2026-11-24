@@ -691,6 +691,13 @@ object DelayManager {
         description: String,
         overrideDelaySeconds: Int? = null
     ) {
+        if (BuildConfig.PERMANENT_APP_LIMITS) {
+            val oldLimit = ConfigManager.loadConfig(context).limits.find { it.packageName == pkg }
+            if (oldLimit != null && ConfigManager.isAppLimitRelaxed(oldLimit, newLimit)) {
+                Log.w(TAG, "Refused app limit relaxation request: flavor enforces PERMANENT_APP_LIMITS ($pkg)")
+                return
+            }
+        }
         val state = loadState(context)
         val effectiveDelaySeconds = overrideDelaySeconds ?: getEffectiveDelaySeconds(state)
         val executeAt = System.currentTimeMillis() + (effectiveDelaySeconds * 1000L)
@@ -833,6 +840,10 @@ object DelayManager {
         description: String,
         overrideDelaySeconds: Int? = null
     ) {
+        if (BuildConfig.PERMANENT_CURFEW) {
+            Log.w(TAG, "Refused curfew deletion request: flavor enforces PERMANENT_CURFEW ($sig)")
+            return
+        }
         val state = loadState(context)
         val effectiveDelaySeconds = overrideDelaySeconds ?: getEffectiveDelaySeconds(state)
         val executeAt = System.currentTimeMillis() + (effectiveDelaySeconds * 1000L)
@@ -999,7 +1010,8 @@ object DelayManager {
             }
         }
 
-        ConfigManager.saveConfig(context, activeConfig)
+        val enforcedConfig = ConfigManager.enforcePermanentRules(ConfigManager.loadConfig(context), activeConfig)
+        ConfigManager.saveConfig(context, enforcedConfig)
 
         val remaining = state.requestedConfigUpdates.filter { it.executeAt > now }
         saveState(context, state.copy(requestedConfigUpdates = remaining))

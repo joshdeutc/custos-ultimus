@@ -373,6 +373,16 @@ class GuardianService : Service() {
                 return true
             }
 
+            val enforcedNewConfig = ConfigManager.enforcePermanentRules(currentConfig, newConfig)
+            if (enforcedNewConfig != newConfig) {
+                if (enforcedNewConfig != currentConfig) {
+                    ConfigManager.saveConfig(applicationContext, enforcedNewConfig)
+                    GuardianEngine.evaluateLimits(applicationContext)
+                }
+                Log.w(TAG, "Permanent rules enforced: blocked rule deletion/relaxation")
+                return false
+            }
+
             val globalDelay = DelayManager.getCurrentEffectiveDelaySeconds(applicationContext)
             val defer = ConfigManager.requiredDefer(currentConfig, newConfig, globalDelay)
             val unlockApplies = !defer.fromExplicitTimer && DelayManager.isSettingsUnlocked(applicationContext)
